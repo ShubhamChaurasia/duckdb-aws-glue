@@ -55,6 +55,9 @@ public:
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
+	//! Visits only the named databases and tables: GetTable per named table is cheaper than GetTables (100 per page)
+	void ScanEntries(ClientContext &context, CatalogType type, const CatalogScanFilter &filter,
+	                 const std::function<void(CatalogEntry &)> &callback) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();

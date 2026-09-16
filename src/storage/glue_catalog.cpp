@@ -22,6 +22,8 @@
 #include "storage/glue_table.hpp"
 #include "storage/glue_hive_insert.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 GlueCatalog::GlueCatalog(AttachedDatabase &db_p, AccessMode access_mode, GlueAttachOptions options_p)
@@ -164,8 +166,57 @@ string GlueCatalog::GetTableLocation(const GlueDatabaseInfo &database, const str
 	    table_name, database.name);
 }
 
+//! Lowercased (Glue names are lowercase), sorted, deduplicated
+static vector<string> GlueNames(const vector<string> &hints) {
+	vector<string> names;
+	for (auto &hint : hints) {
+		names.push_back(StringUtil::Lower(hint));
+	}
+	std::sort(names.begin(), names.end());
+	names.erase(std::unique(names.begin(), names.end()), names.end());
+	return names;
+}
+
+void GlueCatalog::ScanEntries(ClientContext &context, CatalogType type, const CatalogScanFilter &filter,
+                              const std::function<void(CatalogEntry &)> &callback) {
+	vector<reference<SchemaCatalogEntry>> to_scan;
+	if (filter.schemas) {
+		for (auto &name : GlueNames(*filter.schemas)) {
+			auto schema = GetSchema(context, Identifier(name), OnEntryNotFound::RETURN_NULL);
+			if (schema) {
+				to_scan.push_back(*schema);
+			}
+		}
+	} else {
+		to_scan = Catalog::GetSchemas(context);
+	}
+	for (auto &schema_ref : to_scan) {
+		auto &schema = schema_ref.get();
+		if (!filter.tables) {
+			schema.Scan(context, type, callback);
+			continue;
+		}
+		// unlike the listing, a named table that cannot be converted throws
+		auto transaction = GetCatalogTransaction(context);
+		for (auto &name : GlueNames(*filter.tables)) {
+			auto entry = schema.GetEntry(transaction, type, Identifier(name));
+			if (entry) {
+				callback(*entry);
+			}
+		}
+	}
+}
+
 void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
-	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
+	// the set is a hash map; return the schemas in name order
+	vector<reference<GlueSchemaEntry>> sorted;
+	schemas.Scan(context, [&](CatalogEntry &schema) { sorted.push_back(schema.Cast<GlueSchemaEntry>()); });
+	std::sort(sorted.begin(), sorted.end(), [](reference<GlueSchemaEntry> a, reference<GlueSchemaEntry> b) {
+		return StringUtil::CILessThan(a.get().name.GetIdentifierName(), b.get().name.GetIdentifierName());
+	});
+	for (auto &schema : sorted) {
+		callback(schema.get());
+	}
 }
 
 optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,
