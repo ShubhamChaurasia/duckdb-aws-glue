@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/function/function_set.hpp"
 #include "duckdb/function/table_function.hpp"
 
 namespace duckdb {
@@ -30,6 +31,8 @@ TableFunction GetGlueSetTableLocationFunction();
 //! 'partition' and 'new_partition' are lists of {key, value}; the actions are validated against Glue before any
 //! of them is applied, consecutive adds go out as one BatchCreatePartition call.
 TableFunction GetGlueAlterTableFunction();
+//! CALL glue_flush_cache('catalog'[, 'database'[, 'table']]): forget cached Glue metadata
+TableFunctionSet GetGlueFlushCacheFunction();
 
 //! hive_scan('s3://root', schema := {col: 'TYPE', ...}, partitions := [{key: value, ..., location: '...'}, ...],
 //! partition_keys := [...]): read a parquet Hive table without a catalog. The same scan as for a Glue Hive table,

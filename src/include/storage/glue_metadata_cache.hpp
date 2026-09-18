@@ -9,6 +9,7 @@
 #include "glue_api.hpp"
 
 #include <chrono>
+#include <functional>
 
 namespace duckdb {
 class ClientContext;
@@ -108,15 +109,19 @@ private:
 	unordered_map<CatalogEntry *, shared_ptr<CatalogEntry>> pinned_entries;
 };
 
-//! The global scope. Lives in the GlueCatalog, shared by every connection, entries expire after a time-to-live.
+//! The global scope. Lives in the GlueCatalog, shared by every connection, entries expire after a time-to-live
+//! (setting glue_metadata_global_cache_ttl_millis; 0 turns this scope off).
 class GlueMetadataCache : public GlueCachedMetadata {
 public:
-	std::chrono::milliseconds TTL() const;
+	static std::chrono::milliseconds TTL(ClientContext &context);
 };
 
 //! Cache-aware lookups. Each resolves statement scope, then global scope, then Glue, and stores a successful answer in
-//! both. The statement scope is skipped when the catalog has no transaction yet (during ATTACH).
+//! both. The statement scope is skipped when the catalog has no transaction yet (during ATTACH). With the setting
+//! glue_metadata_cache off, every lookup goes to Glue and nothing is stored.
 struct GlueMetadata {
+	//! The setting glue_metadata_cache
+	static bool Enabled(ClientContext &context);
 	//! The database, or null if it does not exist
 	static shared_ptr<const GlueDatabaseInfo> GetDatabase(ClientContext &context, GlueCatalog &catalog,
 	                                                      const string &database_name);
@@ -145,9 +150,21 @@ struct GlueMetadata {
 	                            const string &table_name);
 	//! Forget a database and its tables in both scopes
 	static void InvalidateDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name);
+	//! Forget everything in both scopes (glue_flush_cache)
+	static void Clear(ClientContext &context, GlueCatalog &catalog);
 
 private:
 	static optional_ptr<GlueStatementCache> StatementScope(ClientContext &context, GlueCatalog &catalog);
+	//! Statement scope, then global scope, then 'load' (which returns null for "does not exist"); a loaded value is
+	//! stored in every scope that is on
+	template <class T>
+	static shared_ptr<const T> Resolve(ClientContext &context, GlueCatalog &catalog,
+	                                   GlueCacheMap<T> GlueCachedMetadata::*map, const string &key,
+	                                   const std::function<shared_ptr<const T>()> &load);
+	//! Store what a listing returned under each name, in every scope that is on
+	template <class T>
+	static void Seed(ClientContext &context, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
+	                 const string &key, shared_ptr<const T> value);
 };
 
 //! Forgets a table (or a whole database) when it goes out of scope: placed at the top of every Glue mutation so the

@@ -1,4 +1,5 @@
 #include "glue_functions.hpp"
+#include "duckdb/function/function_set.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/exception.hpp"
@@ -727,6 +728,72 @@ TableFunction GetGlueAlterTableFunction() {
 	TableFunction function("glue_alter_table", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
 	                       GlueAlterTableBind, GluePartitionChangeInit);
 	return function;
+}
+
+//===--------------------------------------------------------------------===//
+// glue_flush_cache
+//===--------------------------------------------------------------------===//
+struct GlueFlushCacheBindData : public TableFunctionData {
+	optional_ptr<GlueCatalog> catalog;
+	string database_name;
+	string table_name;
+};
+
+unique_ptr<FunctionData> GlueFlushCacheBind(ClientContext &context, TableFunctionBindInput &input,
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<GlueFlushCacheBindData>();
+	auto catalog_name = input.inputs[0].GetValue<string>();
+	auto catalog = Catalog::GetCatalogEntry(context, Identifier(catalog_name));
+	if (!catalog || catalog->GetCatalogType() != "glue") {
+		throw BinderException("glue_flush_cache: '%s' is not an attached Glue catalog", catalog_name);
+	}
+	result->catalog = &catalog->Cast<GlueCatalog>();
+	if (input.inputs.size() > 1 && !input.inputs[1].IsNull()) {
+		result->database_name = input.inputs[1].GetValue<string>();
+	}
+	if (input.inputs.size() > 2 && !input.inputs[2].IsNull()) {
+		if (result->database_name.empty()) {
+			throw BinderException("glue_flush_cache: a table needs its database");
+		}
+		result->table_name = input.inputs[2].GetValue<string>();
+	}
+	names = {"flushed"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+void GlueFlushCacheScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GluePartitionChangeState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GlueFlushCacheBindData>();
+	auto &catalog = *bind_data.catalog.get_mutable();
+	string flushed;
+	if (!bind_data.table_name.empty()) {
+		GlueMetadata::InvalidateTable(context, catalog, bind_data.database_name, bind_data.table_name);
+		flushed = bind_data.database_name + "." + bind_data.table_name;
+	} else if (!bind_data.database_name.empty()) {
+		GlueMetadata::InvalidateDatabase(context, catalog, bind_data.database_name);
+		flushed = bind_data.database_name;
+	} else {
+		GlueMetadata::Clear(context, catalog);
+		flushed = catalog.GetName().GetIdentifierName();
+	}
+	output.SetValue(0, 0, Value(flushed));
+	output.SetCardinality(1);
+}
+
+TableFunctionSet GetGlueFlushCacheFunction() {
+	TableFunctionSet set("glue_flush_cache");
+	set.AddFunction(
+	    TableFunction({LogicalType::VARCHAR}, GlueFlushCacheScan, GlueFlushCacheBind, GluePartitionChangeInit));
+	set.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR}, GlueFlushCacheScan, GlueFlushCacheBind,
+	                              GluePartitionChangeInit));
+	set.AddFunction(TableFunction({LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                              GlueFlushCacheScan, GlueFlushCacheBind, GluePartitionChangeInit));
+	return set;
 }
 
 } // namespace duckdb

@@ -52,13 +52,25 @@ void GlueStatementCache::PinEntry(shared_ptr<CatalogEntry> entry) {
 //===--------------------------------------------------------------------===//
 // GlueMetadataCache
 //===--------------------------------------------------------------------===//
-std::chrono::milliseconds GlueMetadataCache::TTL() const {
+std::chrono::milliseconds GlueMetadataCache::TTL(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_metadata_global_cache_ttl_millis", setting) && !setting.IsNull()) {
+		return std::chrono::milliseconds(setting.GetValue<uint64_t>());
+	}
 	return std::chrono::milliseconds(300000);
 }
 
 //===--------------------------------------------------------------------===//
 // GlueMetadata
 //===--------------------------------------------------------------------===//
+bool GlueMetadata::Enabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_metadata_cache", setting) && !setting.IsNull()) {
+		return setting.GetValue<bool>();
+	}
+	return true;
+}
+
 optional_ptr<GlueStatementCache> GlueMetadata::StatementScope(ClientContext &context, GlueCatalog &catalog) {
 	// During ATTACH the database is not registered yet and has no transaction: only the global scope applies
 	auto transaction = Transaction::TryGet(context, catalog.GetAttached());
@@ -68,29 +80,67 @@ optional_ptr<GlueStatementCache> GlueMetadata::StatementScope(ClientContext &con
 	return &transaction->Cast<GlueTransaction>().statement_cache;
 }
 
-shared_ptr<const GlueDatabaseInfo> GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog,
-                                                             const string &database_name) {
+static const std::chrono::milliseconds NO_EXPIRY(0);
+
+template <class T>
+shared_ptr<const T> GlueMetadata::Resolve(ClientContext &context, GlueCatalog &catalog,
+                                          GlueCacheMap<T> GlueCachedMetadata::*map, const string &key,
+                                          const std::function<shared_ptr<const T>()> &load) {
+	if (!Enabled(context)) {
+		return load();
+	}
 	auto statement = StatementScope(context, catalog);
 	if (statement) {
-		auto pinned = statement->databases.Get(database_name, std::chrono::milliseconds(0));
+		auto pinned = ((*statement).*map).Get(key, NO_EXPIRY);
 		if (pinned) {
 			return pinned;
 		}
 	}
-	auto &global = catalog.metadata_cache;
-	auto database = global.databases.Get(database_name, global.TTL());
-	if (!database) {
-		GlueDatabaseInfo info;
-		if (!GlueAPI::GetDatabase(context, catalog, database_name, info)) {
+	auto ttl = GlueMetadataCache::TTL(context);
+	auto &global = catalog.metadata_cache.*map;
+	shared_ptr<const T> value;
+	if (ttl.count() > 0) {
+		value = global.Get(key, ttl);
+	}
+	if (!value) {
+		value = load();
+		if (!value) {
+			// success-only: what does not exist is not remembered
 			return nullptr;
 		}
-		database = make_shared_ptr<const GlueDatabaseInfo>(std::move(info));
-		database = global.databases.PutIfAbsent(database_name, database, global.TTL());
+		if (ttl.count() > 0) {
+			value = global.PutIfAbsent(key, value, ttl);
+		}
 	}
 	if (statement) {
-		database = statement->databases.PutIfAbsent(database_name, database, std::chrono::milliseconds(0));
+		value = ((*statement).*map).PutIfAbsent(key, value, NO_EXPIRY);
 	}
-	return database;
+	return value;
+}
+
+template <class T>
+void GlueMetadata::Seed(ClientContext &context, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
+                        const string &key, shared_ptr<const T> value) {
+	auto ttl = GlueMetadataCache::TTL(context);
+	if (ttl.count() > 0) {
+		value = (catalog.metadata_cache.*map).PutIfAbsent(key, value, ttl);
+	}
+	auto statement = StatementScope(context, catalog);
+	if (statement) {
+		((*statement).*map).PutIfAbsent(key, value, NO_EXPIRY);
+	}
+}
+
+shared_ptr<const GlueDatabaseInfo> GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog,
+                                                             const string &database_name) {
+	return Resolve<GlueDatabaseInfo>(context, catalog, &GlueCachedMetadata::databases, database_name,
+	                                 [&]() -> shared_ptr<const GlueDatabaseInfo> {
+		                                 GlueDatabaseInfo info;
+		                                 if (!GlueAPI::GetDatabase(context, catalog, database_name, info)) {
+			                                 return nullptr;
+		                                 }
+		                                 return make_shared_ptr<const GlueDatabaseInfo>(std::move(info));
+	                                 });
 }
 
 bool GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -104,105 +154,49 @@ bool GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog, con
 }
 
 shared_ptr<const vector<GlueDatabaseInfo>> GlueMetadata::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
-	auto statement = StatementScope(context, catalog);
-	if (statement) {
-		auto pinned = statement->database_list.Get("", std::chrono::milliseconds(0));
-		if (pinned) {
-			return pinned;
-		}
-	}
-	auto &global = catalog.metadata_cache;
-	auto list = global.database_list.Get("", global.TTL());
-	if (!list) {
-		list = make_shared_ptr<const vector<GlueDatabaseInfo>>(GlueAPI::GetDatabases(context, catalog));
-		list = global.database_list.PutIfAbsent("", list, global.TTL());
-		for (auto &database : *list) {
-			global.databases.PutIfAbsent(database.name, make_shared_ptr<const GlueDatabaseInfo>(database),
-			                             global.TTL());
-		}
-	}
-	if (statement) {
-		// only the list is pinned: a lookup by name pins the global per-name value, so an entry built from it keeps
-		// the same identity across statements until the global scope reloads
-		list = statement->database_list.PutIfAbsent("", list, std::chrono::milliseconds(0));
-	}
-	return list;
+	return Resolve<vector<GlueDatabaseInfo>>(
+	    context, catalog, &GlueCachedMetadata::database_list, "", [&]() -> shared_ptr<const vector<GlueDatabaseInfo>> {
+		    auto list = make_shared_ptr<const vector<GlueDatabaseInfo>>(GlueAPI::GetDatabases(context, catalog));
+		    if (Enabled(context)) {
+			    // a lookup by name that follows the listing is served from the cache
+			    for (auto &database : *list) {
+				    Seed<GlueDatabaseInfo>(context, catalog, &GlueCachedMetadata::databases, database.name,
+				                           make_shared_ptr<const GlueDatabaseInfo>(database));
+			    }
+		    }
+		    return list;
+	    });
 }
 
 shared_ptr<const vector<GlueTableInfo>> GlueMetadata::GetTables(ClientContext &context, GlueCatalog &catalog,
                                                                 const string &database_name) {
-	auto statement = StatementScope(context, catalog);
-	if (statement) {
-		auto pinned = statement->table_lists.Get(database_name, std::chrono::milliseconds(0));
-		if (pinned) {
-			return pinned;
-		}
-	}
-	auto &global = catalog.metadata_cache;
-	auto list = global.table_lists.Get(database_name, global.TTL());
-	if (!list) {
-		list = make_shared_ptr<const vector<GlueTableInfo>>(GlueAPI::GetTables(context, catalog, database_name));
-		list = global.table_lists.PutIfAbsent(database_name, list, global.TTL());
-		for (auto &table : *list) {
-			global.tables.PutIfAbsent(GlueCachedMetadata::TableKey(database_name, table.name),
-			                          make_shared_ptr<const GlueTableInfo>(table), global.TTL());
-		}
-	}
-	if (statement) {
-		list = statement->table_lists.PutIfAbsent(database_name, list, std::chrono::milliseconds(0));
-	}
-	return list;
+	return Resolve<vector<GlueTableInfo>>(
+	    context, catalog, &GlueCachedMetadata::table_lists, database_name,
+	    [&]() -> shared_ptr<const vector<GlueTableInfo>> {
+		    auto list =
+		        make_shared_ptr<const vector<GlueTableInfo>>(GlueAPI::GetTables(context, catalog, database_name));
+		    if (Enabled(context)) {
+			    for (auto &table : *list) {
+				    Seed<GlueTableInfo>(context, catalog, &GlueCachedMetadata::tables,
+				                        GlueCachedMetadata::TableKey(database_name, table.name),
+				                        make_shared_ptr<const GlueTableInfo>(table));
+			    }
+		    }
+		    return list;
+	    });
 }
 
 shared_ptr<const GlueTableInfo> GlueMetadata::GetTable(ClientContext &context, GlueCatalog &catalog,
                                                        const string &database_name, const string &table_name) {
-	auto key = GlueCachedMetadata::TableKey(database_name, table_name);
-	auto statement = StatementScope(context, catalog);
-	if (statement) {
-		auto pinned = statement->tables.Get(key, std::chrono::milliseconds(0));
-		if (pinned) {
-			return pinned;
-		}
-	}
-	auto &global = catalog.metadata_cache;
-	auto table = global.tables.Get(key, global.TTL());
-	if (!table) {
-		GlueTableInfo info;
-		if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info)) {
-			// success-only: a table that does not exist is not remembered
-			return nullptr;
-		}
-		table = make_shared_ptr<const GlueTableInfo>(std::move(info));
-		table = global.tables.PutIfAbsent(key, table, global.TTL());
-	}
-	if (statement) {
-		table = statement->tables.PutIfAbsent(key, table, std::chrono::milliseconds(0));
-	}
-	return table;
-}
-
-shared_ptr<const vector<GluePartitionInfo>> GlueMetadata::GetPartitions(ClientContext &context, GlueCatalog &catalog,
-                                                                        const string &database_name,
-                                                                        const string &table_name) {
-	auto key = GlueCachedMetadata::TableKey(database_name, table_name);
-	auto statement = StatementScope(context, catalog);
-	if (statement) {
-		auto pinned = statement->partitions.Get(key, std::chrono::milliseconds(0));
-		if (pinned) {
-			return pinned;
-		}
-	}
-	auto &global = catalog.metadata_cache;
-	auto result = global.partitions.Get(key, global.TTL());
-	if (!result) {
-		result = make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, catalog, database_name, table_name));
-		result = global.partitions.PutIfAbsent(key, result, global.TTL());
-	}
-	if (statement) {
-		result = statement->partitions.PutIfAbsent(key, result, std::chrono::milliseconds(0));
-	}
-	return result;
+	return Resolve<GlueTableInfo>(context, catalog, &GlueCachedMetadata::tables,
+	                              GlueCachedMetadata::TableKey(database_name, table_name),
+	                              [&]() -> shared_ptr<const GlueTableInfo> {
+		                              GlueTableInfo info;
+		                              if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info)) {
+			                              return nullptr;
+		                              }
+		                              return make_shared_ptr<const GlueTableInfo>(std::move(info));
+	                              });
 }
 
 bool GlueMetadata::GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -213,6 +207,17 @@ bool GlueMetadata::GetTable(ClientContext &context, GlueCatalog &catalog, const 
 	}
 	result = *table;
 	return true;
+}
+
+shared_ptr<const vector<GluePartitionInfo>> GlueMetadata::GetPartitions(ClientContext &context, GlueCatalog &catalog,
+                                                                        const string &database_name,
+                                                                        const string &table_name) {
+	return Resolve<vector<GluePartitionInfo>>(
+	    context, catalog, &GlueCachedMetadata::partitions, GlueCachedMetadata::TableKey(database_name, table_name),
+	    [&]() -> shared_ptr<const vector<GluePartitionInfo>> {
+		    return make_shared_ptr<const vector<GluePartitionInfo>>(
+		        GlueAPI::GetPartitions(context, catalog, database_name, table_name));
+	    });
 }
 
 GlueInvalidateOnExit::~GlueInvalidateOnExit() {
@@ -248,6 +253,14 @@ void GlueMetadata::InvalidateDatabase(ClientContext &context, GlueCatalog &catal
 	auto statement = StatementScope(context, catalog);
 	if (statement) {
 		statement->InvalidateDatabase(database_name);
+	}
+}
+
+void GlueMetadata::Clear(ClientContext &context, GlueCatalog &catalog) {
+	catalog.metadata_cache.Clear();
+	auto statement = StatementScope(context, catalog);
+	if (statement) {
+		statement->Clear();
 	}
 }
 
