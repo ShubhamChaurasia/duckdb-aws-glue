@@ -1,0 +1,199 @@
+# name: test/sql/hive/catalog/metadata_cache.test
+# description: Glue metadata is resolved once per statement and kept across statements; mutations, the switch and the flush restore a fresh read
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.mc_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.mc_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.mc_orders VALUES (1, 10.0, '2026-01-01'), (2, 20.0, '2026-01-02'), (3, 30.0, '2026-01-03');
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# a fresh attach: nothing of mc_orders is cached yet
+statement ok
+attach '{GLUE_CATALOG_ID}' as counted (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# one reference
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM counted.default.mc_orders;
+----
+3
+
+statement ok
+CREATE TEMP TABLE one_reference AS SELECT glue_calls('GetPartitions') AS get_partitions, glue_calls('GetTable') AS get_table;
+
+query I
+SELECT get_partitions >= 1 AND get_table >= 1 FROM one_reference;
+----
+true
+
+# next statement: nothing is asked of Glue
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM counted.default.mc_orders;
+----
+3
+
+query II
+SELECT glue_calls('GetPartitions'), glue_calls('GetTable');
+----
+0	0
+
+# two references in one statement, flushed first: the same cost as one
+statement ok
+CALL glue_flush_cache('counted', 'default', 'mc_orders');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT id FROM counted.default.mc_orders UNION ALL SELECT id FROM counted.default.mc_orders);
+----
+6
+
+query I
+SELECT glue_calls('GetPartitions') = (SELECT get_partitions FROM one_reference);
+----
+true
+
+# DESCRIBE of a cached table
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DESCRIBE counted.default.mc_orders;
+
+query II
+SELECT glue_calls('GetPartitions'), glue_calls('GetTable');
+----
+0	0
+
+# INSERT invalidates: the next read sees the row and fetched the partitions again
+statement ok
+INSERT INTO counted.default.mc_orders VALUES (4, 40.0, '2026-01-04');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM counted.default.mc_orders;
+----
+4
+
+query I
+SELECT glue_calls('GetPartitions') >= 1;
+----
+true
+
+# a partition dropped through the extension is gone from the next read
+statement ok
+CALL glue_drop_partition('counted.default.mc_orders', {dt: '2026-01-04'});
+
+query I
+SELECT count(*) FROM counted.default.mc_orders;
+----
+3
+
+# the switch off: every reference asks Glue
+statement ok
+SET glue_metadata_cache = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT id FROM counted.default.mc_orders UNION ALL SELECT id FROM counted.default.mc_orders);
+----
+6
+
+query I
+SELECT glue_calls('GetPartitions') = 2 * (SELECT get_partitions FROM one_reference);
+----
+true
+
+statement ok
+SET glue_metadata_cache = true;
+
+# TTL 0: the statement scope only
+statement ok
+SET glue_metadata_global_cache_ttl_millis = 0;
+
+statement ok
+CALL glue_flush_cache('counted');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM (SELECT id FROM counted.default.mc_orders UNION ALL SELECT id FROM counted.default.mc_orders);
+----
+6
+
+query I
+SELECT glue_calls('GetPartitions') = (SELECT get_partitions FROM one_reference);
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM counted.default.mc_orders;
+----
+3
+
+query I
+SELECT glue_calls('GetPartitions') >= 1;
+----
+true
+
+statement ok
+RESET glue_metadata_global_cache_ttl_millis;
+
+# the cache does not change what is read
+query III
+SELECT id, amount, dt FROM counted.default.mc_orders ORDER BY id;
+----
+1	10.0	2026-01-01
+2	20.0	2026-01-02
+3	30.0	2026-01-03
+
+statement error
+CALL glue_flush_cache('not_attached');
+----
+not an attached Glue catalog
+
+statement ok
+DROP TABLE my_datalake.default.mc_orders;
