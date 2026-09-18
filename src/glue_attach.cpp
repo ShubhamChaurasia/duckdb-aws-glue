@@ -8,6 +8,7 @@
 #include "glue_api.hpp"
 #include "glue_options.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 
 #include <regex>
 
@@ -92,7 +93,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	GlueAPI::VerifyConnection(context, *catalog);
 	if (!catalog->options.default_schema.empty()) {
 		GlueDatabaseInfo database;
-		if (!GlueAPI::GetDatabase(context, *catalog, catalog->options.default_schema.GetIdentifierName(), database)) {
+		if (!GlueMetadata::GetDatabase(context, *catalog, catalog->options.default_schema.GetIdentifierName(),
+		                               database)) {
 			throw InvalidConfigurationException("default_schema '%s' does not exist in Glue catalog '%s'",
 			                                    catalog->options.default_schema.GetIdentifierName(),
 			                                    catalog->options.path);

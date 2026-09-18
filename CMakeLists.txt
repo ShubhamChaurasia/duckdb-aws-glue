@@ -42,6 +42,7 @@ set(EXTENSION_SOURCES
     src/storage/glue_table.cpp
     src/storage/hive_multi_file_reader.cpp
     src/storage/glue_hive_insert.cpp
+    src/storage/glue_metadata_cache.cpp
     src/storage/glue_transaction.cpp
     src/storage/glue_transaction_manager.cpp)
 

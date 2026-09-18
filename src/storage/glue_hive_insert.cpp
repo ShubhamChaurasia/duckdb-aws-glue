@@ -18,6 +18,7 @@
 
 #include "glue_api.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 #include "storage/glue_schema_entry.hpp"
 #include "storage/glue_table.hpp"
 
@@ -279,6 +280,11 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	auto &table_info = table.table_info;
+	if (!state.written_files.empty()) {
+		// the files changed even if no partition needs registering (unpartitioned table): forget the cached partitions
+		GlueMetadata::InvalidateTable(context, table.catalog.Cast<GlueCatalog>(), table_info.database_name,
+		                              table_info.name);
+	}
 	if (discard || table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}

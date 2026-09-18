@@ -2,6 +2,8 @@
 
 #include "duckdb/transaction/transaction.hpp"
 
+#include "storage/glue_metadata_cache.hpp"
+
 namespace duckdb {
 class GlueCatalog;
 
@@ -22,6 +24,9 @@ public:
 
 public:
 	GlueCatalog &glue_catalog;
+	//! Glue metadata this transaction resolved: kept for the whole statement (or explicit transaction) so every
+	//! reference to a table sees the same definition and partitions
+	GlueStatementCache statement_cache;
 
 private:
 	GlueTransactionState transaction_state;

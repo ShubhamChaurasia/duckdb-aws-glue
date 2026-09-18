@@ -11,6 +11,7 @@
 #include "glue_api.hpp"
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 #include "storage/glue_table.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 
@@ -55,8 +56,8 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	}
 	GluePartitionTarget result;
 	result.catalog = &catalog->Cast<GlueCatalog>();
-	if (!GlueAPI::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
-	                       qualified.Name().GetIdentifierName(), result.table)) {
+	if (!GlueMetadata::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
+	                            qualified.Name().GetIdentifierName(), result.table)) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'",
 		                       qualified.Schema().GetIdentifierName(), qualified.Name().GetIdentifierName(),
 		                       qualified.Catalog().GetIdentifierName());

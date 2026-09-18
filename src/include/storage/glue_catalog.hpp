@@ -7,6 +7,7 @@
 #include "duckdb/main/secret/secret_manager.hpp"
 
 #include "glue_options.hpp"
+#include "storage/glue_metadata_cache.hpp"
 #include "storage/glue_schema_set.hpp"
 
 #include <memory>
@@ -89,6 +90,9 @@ public:
 	mutex client_lock;
 	string client_cache_key;
 	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
+
+	//! Glue metadata shared by every connection, entries expire after a time-to-live
+	GlueMetadataCache metadata_cache;
 
 private:
 	//! Throw unless 'table' is a Hive table, the only kind that can be written

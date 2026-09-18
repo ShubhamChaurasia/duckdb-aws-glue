@@ -14,6 +14,7 @@
 #include "glue_functions.hpp"
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 #include "storage/glue_schema_entry.hpp"
 #include "storage/hive_multi_file_reader.hpp"
 
@@ -39,11 +40,11 @@ TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	GlueTableInfo result;
-	if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, result)) {
+	auto result = GlueMetadata::GetTable(context, glue_catalog, table_info.database_name, table_info.name);
+	if (!result) {
 		throw CatalogException("Glue table '%s.%s' no longer exists", table_info.database_name, table_info.name);
 	}
-	return result;
+	return *result;
 }
 
 //===--------------------------------------------------------------------===//
@@ -87,7 +88,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	if (!scan_info->partition_keys.empty()) {
 		auto &glue_catalog = catalog.Cast<GlueCatalog>();
 		scan_info->partitions =
-		    GlueAPI::GetPartitions(context, glue_catalog, latest_info.database_name, latest_info.name);
+		    *GlueMetadata::GetPartitions(context, glue_catalog, latest_info.database_name, latest_info.name);
 	}
 	return BindHiveScan(context, std::move(scan_info), bind_data);
 }
