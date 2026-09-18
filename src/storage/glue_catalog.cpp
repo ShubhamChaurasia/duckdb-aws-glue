@@ -116,12 +116,12 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 	database.location_uri = GetDatabaseLocation(schema_name);
 	GlueAPI::CreateDatabase(context, *this, database);
 
-	// re-fetch so the cached entry reflects what Glue stored
-	GlueDatabaseInfo created;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, created)) {
+	// the entry is built from what Glue stored (CreateDatabase invalidated the cache)
+	auto created = schemas.GetEntry(context, schema_name);
+	if (!created) {
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
-	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
+	return created;
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {

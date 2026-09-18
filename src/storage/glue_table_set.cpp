@@ -1,5 +1,6 @@
 #include "storage/glue_table_set.hpp"
 
+#include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/parser/column_definition.hpp"
@@ -8,6 +9,7 @@
 
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 #include "storage/glue_schema_entry.hpp"
 
 namespace duckdb {
@@ -34,74 +36,81 @@ void GlueTableSet::SetTableTypeTag(GlueTable &entry) {
 	entry.tags["table_type"] = GlueTableFormatToString(entry.table_info.GetFormat());
 }
 
-void GlueTableSet::LoadEntries(ClientContext &context) {
-	if (is_loaded) {
-		return;
+GlueTable &GlueTableSet::EntryFor(ClientContext &context, const shared_ptr<const GlueTableInfo> &table) {
+	auto existing = entries.find(table->name);
+	if (existing == entries.end() || existing->second.source != table) {
+		// first sight of this table, or the cache holds a newer definition: (re)build the entry from it
+		Slot slot;
+		slot.entry = CreateTableEntry(*table);
+		slot.source = table;
+		existing = entries.insert_or_assign(table->name, std::move(slot)).first;
 	}
-	auto tables = GlueAPI::GetTables(context, catalog, schema.database_info.name);
-	for (auto &table : tables) {
-		if (entries.find(table.name) != entries.end()) {
-			// already loaded through a direct lookup
-			continue;
-		}
-		unique_ptr<GlueTable> entry;
-		try {
-			entry = CreateTableEntry(table);
-		} catch (std::exception &ex) {
-			// A table whose Glue definition we can not turn into a DuckDB table (e.g. an unsupported column type)
-			// must not break listing the other tables: leave it out and log why. Looking the table up by name
-			// still reports the error to the user.
-			ErrorData error(ex);
-			DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.database_info.name, table.name,
-			                 error.RawMessage());
-			continue;
-		}
-		entries.emplace(table.name, std::move(entry));
-	}
-	is_loaded = true;
+	// the caller gets a reference: keep the entry alive for the statement even if it is replaced meanwhile
+	GlueMetadata::PinEntry(context, catalog, existing->second.entry);
+	return *existing->second.entry;
 }
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
-	auto &name = lookup.GetEntryName();
+	return GetEntry(context, lookup.GetEntryName());
+}
+
+optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const string &name) {
+	auto table = GlueMetadata::GetTable(context, catalog, schema.database_info.name, name);
 	lock_guard<mutex> guard(entry_lock);
-	auto entry = entries.find(name);
-	if (entry != entries.end()) {
-		return entry->second.get();
-	}
-	// not cached, ask Glue for this table directly
-	GlueTableInfo table;
-	if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+	if (!table) {
+		entries.erase(name);
 		return nullptr;
 	}
-	auto result = entries.emplace(table.name, CreateTableEntry(table));
-	return result.first->second.get();
+	return &EntryFor(context, table);
 }
 
 void GlueTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
-	lock_guard<mutex> guard(entry_lock);
-	LoadEntries(context);
-	for (auto &entry : entries) {
-		callback(*entry.second);
+	auto tables = GlueMetadata::GetTables(context, catalog, schema.database_info.name);
+	// the listing seeded the per-name cache, so these are served from it (and are the same objects a lookup by name
+	// returns); resolved before taking the lock so it is never held across a Glue call
+	auto cached = GlueMetadata::Enabled(context);
+	vector<shared_ptr<const GlueTableInfo>> definitions;
+	case_insensitive_set_t listed;
+	for (auto &table : *tables) {
+		listed.insert(table.name);
+		auto definition = cached ? GlueMetadata::GetTable(context, catalog, schema.database_info.name, table.name)
+		                         : make_shared_ptr<const GlueTableInfo>(table);
+		if (definition) {
+			definitions.push_back(std::move(definition));
+		}
 	}
-}
-
-optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<GlueTable> entry) {
-	lock_guard<mutex> guard(entry_lock);
-	auto name = entry->name.GetIdentifierName();
-	entries.erase(name);
-	auto result = entries.emplace(name, std::move(entry));
-	return result.first->second.get();
+	vector<reference<GlueTable>> visible;
+	{
+		lock_guard<mutex> guard(entry_lock);
+		for (auto &definition : definitions) {
+			try {
+				visible.push_back(EntryFor(context, definition));
+			} catch (std::exception &ex) {
+				// A table whose Glue definition we can not turn into a DuckDB table (e.g. an unsupported column type)
+				// must not break listing the other tables: leave it out and log why. Looking the table up by name
+				// still reports the error to the user.
+				ErrorData error(ex);
+				DUCKDB_LOG_ERROR(context, "Glue table '%s.%s' is not listed: %s", schema.database_info.name,
+				                 definition->name, error.RawMessage());
+			}
+		}
+		// tables that are no longer listed were dropped outside this extension
+		for (auto it = entries.begin(); it != entries.end();) {
+			if (listed.find(it->first) == listed.end()) {
+				it = entries.erase(it);
+			} else {
+				++it;
+			}
+		}
+	}
+	for (auto &entry : visible) {
+		callback(entry.get());
+	}
 }
 
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
 	entries.erase(name);
-}
-
-void GlueTableSet::ClearEntries() {
-	lock_guard<mutex> guard(entry_lock);
-	entries.clear();
-	is_loaded = false;
 }
 
 } // namespace duckdb

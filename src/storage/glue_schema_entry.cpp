@@ -17,6 +17,7 @@
 
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
+#include "storage/glue_metadata_cache.hpp"
 
 namespace duckdb {
 
@@ -187,13 +188,13 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	}
 	GlueAPI::CreateHiveTable(context, glue_catalog, table);
 
-	// re-fetch so the entry reflects what Glue stored
-	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created)) {
+	// the entry is built from what Glue stored (CreateHiveTable invalidated the cache)
+	auto created = tables.GetEntry(context, table_name);
+	if (!created) {
 		throw CatalogException("Glue table \"%s.%s\" was created but could not be fetched afterwards",
 		                       database_info.name, table_name);
 	}
-	return tables.CreateEntry(tables.CreateTableEntry(created));
+	return created;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateFunction(CatalogTransaction transaction, CreateFunctionInfo &info) {
@@ -294,9 +295,9 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 	auto &alter_table = info.Cast<AlterTableInfo>();
 
-	// Work on the current Glue definition, not the cached one
+	// Work on the table definition as resolved now, not the copy the entry was built from
 	GlueTableInfo current;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+	if (!GlueMetadata::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
@@ -383,13 +384,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
 
-	// refresh the cached entry from what Glue stored
-	GlueTableInfo updated;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {
+	// the entry is rebuilt from what Glue stored (UpdateTableColumns invalidated the cache)
+	if (!tables.GetEntry(context, table_name)) {
 		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
 		                       table_name);
 	}
-	tables.CreateEntry(tables.CreateTableEntry(updated));
 }
 
 void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
