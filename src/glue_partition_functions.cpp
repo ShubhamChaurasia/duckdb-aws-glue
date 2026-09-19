@@ -735,7 +735,7 @@ TableFunction GetGlueAlterTableFunction() {
 // glue_flush_cache
 //===--------------------------------------------------------------------===//
 struct GlueFlushCacheBindData : public TableFunctionData {
-	optional_ptr<GlueCatalog> catalog;
+	GlueCatalog *catalog = nullptr;
 	string database_name;
 	string table_name;
 };
@@ -770,7 +770,7 @@ void GlueFlushCacheScan(ClientContext &context, TableFunctionInput &data, DataCh
 	}
 	state.done = true;
 	auto &bind_data = data.bind_data->Cast<GlueFlushCacheBindData>();
-	auto &catalog = *bind_data.catalog.get_mutable();
+	auto &catalog = *bind_data.catalog;
 	string flushed;
 	if (!bind_data.table_name.empty()) {
 		GlueMetadata::InvalidateTable(context, catalog, bind_data.database_name, bind_data.table_name);

@@ -92,7 +92,7 @@ public:
 	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
 
 	//! Glue metadata shared by every connection, entries expire after a time-to-live
-	GlueMetadataCache metadata_cache;
+	GlueCachedMetadata metadata_cache;
 
 private:
 	//! Throw unless 'table' is a Hive table, the only kind that can be written

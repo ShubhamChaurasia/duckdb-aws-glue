@@ -161,7 +161,7 @@ statement ok
 CALL glue_drop_partition('my_datalake.default.mc_orders', {dt: '2026-01-05'});
 
 statement ok
-CALL glue_flush_cache('counted');
+CALL glue_flush_cache('counted', 'default');
 
 # ALTER TABLE invalidates: the new column is visible at once
 statement ok
@@ -180,9 +180,9 @@ statement ok
 CALL glue_flush_cache('counted');
 
 query I
-SELECT count(*) >= 2 FROM duckdb_tables() WHERE database_name = 'counted' AND schema_name = 'default' AND table_name IN ('mc_orders', 'mc_seeded');
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'counted' AND schema_name = 'default' AND table_name IN ('mc_orders', 'mc_seeded');
 ----
-true
+2
 
 statement ok
 CALL truncate_duckdb_logs();

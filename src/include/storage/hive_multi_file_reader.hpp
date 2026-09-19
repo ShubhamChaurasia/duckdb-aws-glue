@@ -42,7 +42,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p) {
 		partitions = std::move(partitions_p);
 	}
-	shared_ptr<const vector<GluePartitionInfo>> partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 	//! The partition (index into 'partitions') each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
@@ -54,6 +53,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;
+
+private:
+	shared_ptr<const vector<GluePartitionInfo>> partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on

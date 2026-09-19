@@ -107,7 +107,9 @@ private:
 };
 
 //! The Glue metadata one scope holds: databases, the list of databases, the tables of a database, a table's
-//! definition, and its partitions
+//! definition, and its partitions. The global scope is one of these in the GlueCatalog, shared by every connection,
+//! with entries expiring after glue_metadata_global_cache_ttl_millis (0 turns it off); the transaction scope is the
+//! subclass below.
 struct GlueCachedMetadata {
 	GlueCacheMap<GlueDatabaseInfo> databases;
 	//! one entry, under the empty key
@@ -138,13 +140,6 @@ private:
 	unordered_map<CatalogEntry *, shared_ptr<CatalogEntry>> pinned_entries;
 };
 
-//! The global scope. Lives in the GlueCatalog, shared by every connection, entries expire after a time-to-live
-//! (setting glue_metadata_global_cache_ttl_millis; 0 turns this scope off).
-class GlueMetadataCache : public GlueCachedMetadata {
-public:
-	static std::chrono::milliseconds TTL(ClientContext &context);
-};
-
 //! Cache-aware lookups. Each resolves transaction scope, then global scope, then Glue, and stores a successful answer
 //! in both. The transaction scope is skipped when the catalog has no transaction yet (during ATTACH). With the setting
 //! glue_metadata_cache off, every lookup goes to Glue and nothing is stored.
@@ -161,9 +156,6 @@ struct GlueMetadata {
 	//! The database, or null if it does not exist
 	static shared_ptr<const GlueDatabaseInfo> GetDatabase(ClientContext &context, GlueCatalog &catalog,
 	                                                      const string &database_name);
-	//! As above, copying into 'result'; false if the database does not exist
-	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                        GlueDatabaseInfo &result);
 	//! Every database of the catalog. Each is also stored under its own name, so a lookup by name that follows a
 	//! listing is served from the cache.
 	static shared_ptr<const vector<GlueDatabaseInfo>> GetDatabases(ClientContext &context, GlueCatalog &catalog);
@@ -173,9 +165,6 @@ struct GlueMetadata {
 	//! The table definition, or null if the table does not exist
 	static shared_ptr<const GlueTableInfo> GetTable(ClientContext &context, GlueCatalog &catalog,
 	                                                const string &database_name, const string &table_name);
-	//! As above, copying into 'result'; false if the table does not exist
-	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                     const string &table_name, GlueTableInfo &result);
 	//! The partitions of a table as Glue lists them (empty for an unpartitioned table)
 	static shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name, const string &table_name);
@@ -196,17 +185,24 @@ struct GlueMetadata {
 
 private:
 	static optional_ptr<GlueTransactionCache> TransactionScope(ClientContext &context, GlueCatalog &catalog);
+	//! The setting glue_metadata_global_cache_ttl_millis
+	static std::chrono::milliseconds TTL(ClientContext &context);
 	//! Transaction scope, then global scope, then 'load' (which returns null for "does not exist"); a loaded value is
 	//! stored in every scope that is on
 	template <class T>
-	static shared_ptr<const T> Resolve(ClientContext &context, GlueCatalog &catalog,
+	static shared_ptr<const T> Resolve(const Scopes &scopes, GlueCatalog &catalog,
 	                                   GlueCacheMap<T> GlueCachedMetadata::*map, const string &key,
-	                                   const std::function<shared_ptr<const T>(const Scopes &)> &load);
-	//! Store what a listing returned under each name: it replaces the global scope's value (a listing is fresher than
-	//! anything cached) and fills, but never replaces, the transaction scope's (the snapshot stands)
+	                                   const std::function<shared_ptr<const T>()> &load);
+	//! After a listing came back from Glue: its elements replace the global scope's per-name entries (a listing is
+	//! fresher than anything cached)
 	template <class T>
-	static void Seed(const Scopes &scopes, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
-	                 const string &key, shared_ptr<const T> value);
+	static void SeedGlobal(const Scopes &scopes, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
+	                       const vector<T> &list, const std::function<string(const T &)> &key_of);
+	//! After a listing, from Glue or from the global scope: its elements fill, but never replace, the transaction
+	//! scope's per-name entries, so lookups by name in this transaction agree with the listing
+	template <class T>
+	static void PinList(const Scopes &scopes, GlueCacheMap<T> GlueCachedMetadata::*map, const vector<T> &list,
+	                    const std::function<string(const T &)> &key_of);
 };
 
 //! Forgets a table (or a whole database) when it goes out of scope: placed at the top of every Glue mutation so the
