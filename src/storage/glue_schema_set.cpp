@@ -49,12 +49,15 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
 	auto databases = GlueMetadata::GetDatabases(context, catalog);
-	// entries are compared with their definition by content, so the listing's own copies serve; no per-name lookup
+	// a database this transaction already resolved keeps that definition (the snapshot); otherwise the listing's copy
+	// serves, since entries are compared with their definition by content. No per-name network call either way.
+	auto scopes = GlueMetadata::ResolveScopes(context, catalog);
 	vector<shared_ptr<const GlueDatabaseInfo>> definitions;
 	case_insensitive_set_t listed;
 	for (auto &database : *databases) {
 		listed.insert(database.name);
-		definitions.push_back(make_shared_ptr<const GlueDatabaseInfo>(database));
+		auto pinned = GlueMetadata::PinnedDatabase(scopes, database.name);
+		definitions.push_back(pinned ? pinned : make_shared_ptr<const GlueDatabaseInfo>(database));
 	}
 	vector<reference<GlueSchemaEntry>> visible;
 	{

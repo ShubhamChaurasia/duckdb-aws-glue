@@ -62,6 +62,7 @@ void ParsePartitions(HiveScanInfo &info, const Value &partitions) {
 		throw BinderException("hive_scan: 'partitions' must be a list of structs, one per partition: the partition "
 		                      "columns with their values and optionally 'location'");
 	}
+	vector<GluePartitionInfo> result;
 	for (auto &partition_value : ListValue::GetChildren(partitions)) {
 		if (partition_value.IsNull() || partition_value.type().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("hive_scan: every entry of 'partitions' must be a struct");
@@ -99,15 +100,16 @@ void ParsePartitions(HiveScanInfo &info, const Value &partitions) {
 		}
 		for (idx_t k = 0; k < info.partition_keys.size(); k++) {
 			if (!seen[k]) {
-				throw BinderException("hive_scan: partition %d has no value for partition key '%s'",
-				                      info.partitions.size() + 1, info.partition_keys[k]);
+				throw BinderException("hive_scan: partition %d has no value for partition key '%s'", result.size() + 1,
+				                      info.partition_keys[k]);
 			}
 		}
 		if (partition.location.empty()) {
 			partition.location = DefaultPartitionLocation(info, partition.values);
 		}
-		info.partitions.push_back(std::move(partition));
+		result.push_back(std::move(partition));
 	}
+	info.SetPartitions(make_shared_ptr<const vector<GluePartitionInfo>>(std::move(result)));
 }
 
 unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindInput &input,

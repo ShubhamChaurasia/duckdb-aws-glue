@@ -55,7 +55,7 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 		throw InternalException("Hive scan of '%s.%s': data file '%s' does not belong to any Glue partition",
 		                        database_name, table_name, path);
 	}
-	return partitions[entry->second];
+	return Partitions()[entry->second];
 }
 
 string HiveScanInfo::Describe() const {
@@ -111,7 +111,7 @@ void HiveMultiFileList::PlanListings() const {
 	vector<idx_t> below_root;
 	vector<idx_t> elsewhere;
 	for (auto partition_index : partition_indexes) {
-		auto location = scan_info->partitions[partition_index].location;
+		auto location = scan_info->Partitions()[partition_index].location;
 		StringUtil::RTrim(location, "/");
 		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/")) {
 			below_root.push_back(partition_index);
@@ -137,7 +137,7 @@ void HiveMultiFileList::PlanListings() const {
 }
 
 void HiveMultiFileList::ListPartition(FileSystem &fs, idx_t partition_index) const {
-	auto &partition = scan_info->partitions[partition_index];
+	auto &partition = scan_info->Partitions()[partition_index];
 	if (partition.values.size() != scan_info->partition_keys.size()) {
 		throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values but the table has %d partition "
 		                            "keys",
@@ -173,7 +173,7 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 	// the partitions by location (without trailing slash), to match the files against
 	unordered_map<string, idx_t> partition_by_location;
 	for (auto partition_index : partitions) {
-		auto &partition = scan_info->partitions[partition_index];
+		auto &partition = scan_info->Partitions()[partition_index];
 		if (partition.values.size() != scan_info->partition_keys.size()) {
 			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values but the table has %d "
 			                            "partition keys",
@@ -297,7 +297,7 @@ vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_file
 		if (max_files.IsValid() && result.size() >= max_files.GetIndex()) {
 			break;
 		}
-		result.emplace_back(scan_info->partitions[partition_index].location);
+		result.emplace_back(scan_info->Partitions()[partition_index].location);
 	}
 	return result;
 }
@@ -417,7 +417,7 @@ shared_ptr<MultiFileList> HiveMultiFileReader::CreateFileList(ClientContext &con
 	// every partition, listed lazily; ComplexFilterPushdown narrows the partitions before anything is listed
 	auto &info = ScanInfo();
 	vector<idx_t> partition_indexes;
-	for (idx_t i = 0; i < info.partitions.size(); i++) {
+	for (idx_t i = 0; i < info.Partitions().size(); i++) {
 		partition_indexes.push_back(i);
 	}
 	return make_shared_ptr<HiveMultiFileList>(context, scan_info, std::move(partition_indexes));
@@ -506,7 +506,7 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	vector<idx_t> kept;
 	unordered_set<idx_t> pruning_filters;
 	for (auto partition_index : candidates) {
-		auto &partition = info.partitions[partition_index];
+		auto &partition = info.Partitions()[partition_index];
 		bool keep = true;
 		for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
 			auto &filter = filters[filter_index];

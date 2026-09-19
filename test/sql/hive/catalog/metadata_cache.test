@@ -172,6 +172,34 @@ SELECT count(*) FROM (DESCRIBE counted.default.mc_orders);
 ----
 4
 
+# a listing seeds the lookups: after duckdb_tables() has listed the database, a table it named needs no GetTable
+statement ok
+CREATE TABLE my_datalake.default.mc_seeded (id INTEGER);
+
+statement ok
+CALL glue_flush_cache('counted');
+
+query I
+SELECT count(*) >= 2 FROM duckdb_tables() WHERE database_name = 'counted' AND schema_name = 'default' AND table_name IN ('mc_orders', 'mc_seeded');
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM counted.default.mc_seeded;
+----
+0
+
+query I
+SELECT glue_calls('GetTable');
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.mc_seeded;
+
 # the switch off: every reference asks Glue
 statement ok
 SET glue_metadata_cache = false;

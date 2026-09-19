@@ -80,64 +80,85 @@ optional_ptr<GlueTransactionCache> GlueMetadata::TransactionScope(ClientContext 
 	return &transaction->Cast<GlueTransaction>().transaction_cache;
 }
 
+GlueMetadata::Scopes GlueMetadata::ResolveScopes(ClientContext &context, GlueCatalog &catalog) {
+	Scopes scopes;
+	scopes.enabled = Enabled(context);
+	scopes.ttl = scopes.enabled ? GlueMetadataCache::TTL(context) : std::chrono::milliseconds(0);
+	scopes.transaction = scopes.enabled ? TransactionScope(context, catalog) : nullptr;
+	return scopes;
+}
+
 static const std::chrono::milliseconds NO_EXPIRY(0);
 
 template <class T>
 shared_ptr<const T> GlueMetadata::Resolve(ClientContext &context, GlueCatalog &catalog,
                                           GlueCacheMap<T> GlueCachedMetadata::*map, const string &key,
-                                          const std::function<shared_ptr<const T>()> &load) {
-	if (!Enabled(context)) {
-		return load();
+                                          const std::function<shared_ptr<const T>(const Scopes &)> &load) {
+	auto scopes = ResolveScopes(context, catalog);
+	if (!scopes.enabled) {
+		return load(scopes);
 	}
-	auto transaction = TransactionScope(context, catalog);
-	if (transaction) {
-		auto pinned = ((*transaction).*map).Get(key, NO_EXPIRY);
+	if (scopes.transaction) {
+		auto pinned = ((*scopes.transaction).*map).Get(key, NO_EXPIRY);
 		if (pinned) {
 			return pinned;
 		}
 	}
-	auto ttl = GlueMetadataCache::TTL(context);
 	auto &global = catalog.metadata_cache.*map;
 	shared_ptr<const T> value;
-	if (ttl.count() > 0) {
-		value = global.Get(key, ttl);
+	if (scopes.ttl.count() > 0) {
+		value = global.Get(key, scopes.ttl);
 	}
 	if (!value) {
-		value = load();
+		value = load(scopes);
 		if (!value) {
 			// success-only: what does not exist is not remembered
 			return nullptr;
 		}
-		if (ttl.count() > 0) {
-			value = global.PutIfAbsent(key, value, ttl);
+		if (scopes.ttl.count() > 0) {
+			value = global.PutIfAbsent(key, value, scopes.ttl);
 		}
 	}
-	if (transaction) {
-		value = ((*transaction).*map).PutIfAbsent(key, value, NO_EXPIRY);
+	if (scopes.transaction) {
+		value = ((*scopes.transaction).*map).PutIfAbsent(key, value, NO_EXPIRY);
 	}
 	return value;
 }
 
 template <class T>
-void GlueMetadata::Seed(ClientContext &context, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
+void GlueMetadata::Seed(const Scopes &scopes, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
                         const string &key, shared_ptr<const T> value) {
-	if (!Enabled(context)) {
+	if (!scopes.enabled) {
 		return;
 	}
-	auto ttl = GlueMetadataCache::TTL(context);
-	if (ttl.count() > 0) {
-		value = (catalog.metadata_cache.*map).PutIfAbsent(key, value, ttl);
+	if (scopes.ttl.count() > 0) {
+		(catalog.metadata_cache.*map).Put(key, value, scopes.ttl);
 	}
-	auto transaction = TransactionScope(context, catalog);
-	if (transaction) {
-		((*transaction).*map).PutIfAbsent(key, value, NO_EXPIRY);
+	if (scopes.transaction) {
+		((*scopes.transaction.get_mutable()).*map).PutIfAbsent(key, std::move(value), NO_EXPIRY);
 	}
+}
+
+shared_ptr<const GlueTableInfo> GlueMetadata::PinnedTable(const Scopes &scopes, const string &database_name,
+                                                          const string &table_name) {
+	if (!scopes.transaction) {
+		return nullptr;
+	}
+	return scopes.transaction.get_mutable()->tables.Get(GlueCachedMetadata::TableKey(database_name, table_name),
+	                                                    NO_EXPIRY);
+}
+
+shared_ptr<const GlueDatabaseInfo> GlueMetadata::PinnedDatabase(const Scopes &scopes, const string &database_name) {
+	if (!scopes.transaction) {
+		return nullptr;
+	}
+	return scopes.transaction.get_mutable()->databases.Get(database_name, NO_EXPIRY);
 }
 
 shared_ptr<const GlueDatabaseInfo> GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog,
                                                              const string &database_name) {
 	return Resolve<GlueDatabaseInfo>(context, catalog, &GlueCachedMetadata::databases, database_name,
-	                                 [&]() -> shared_ptr<const GlueDatabaseInfo> {
+	                                 [&](const Scopes &) -> shared_ptr<const GlueDatabaseInfo> {
 		                                 GlueDatabaseInfo info;
 		                                 if (!GlueAPI::GetDatabase(context, catalog, database_name, info)) {
 			                                 return nullptr;
@@ -158,11 +179,12 @@ bool GlueMetadata::GetDatabase(ClientContext &context, GlueCatalog &catalog, con
 
 shared_ptr<const vector<GlueDatabaseInfo>> GlueMetadata::GetDatabases(ClientContext &context, GlueCatalog &catalog) {
 	return Resolve<vector<GlueDatabaseInfo>>(
-	    context, catalog, &GlueCachedMetadata::database_list, "", [&]() -> shared_ptr<const vector<GlueDatabaseInfo>> {
+	    context, catalog, &GlueCachedMetadata::database_list, "",
+	    [&](const Scopes &scopes) -> shared_ptr<const vector<GlueDatabaseInfo>> {
 		    auto list = make_shared_ptr<const vector<GlueDatabaseInfo>>(GlueAPI::GetDatabases(context, catalog));
 		    // a lookup by name that follows the listing is served from the cache
 		    for (auto &database : *list) {
-			    Seed<GlueDatabaseInfo>(context, catalog, &GlueCachedMetadata::databases, database.name,
+			    Seed<GlueDatabaseInfo>(scopes, catalog, &GlueCachedMetadata::databases, database.name,
 			                           make_shared_ptr<const GlueDatabaseInfo>(database));
 		    }
 		    return list;
@@ -173,11 +195,11 @@ shared_ptr<const vector<GlueTableInfo>> GlueMetadata::GetTables(ClientContext &c
                                                                 const string &database_name) {
 	return Resolve<vector<GlueTableInfo>>(
 	    context, catalog, &GlueCachedMetadata::table_lists, database_name,
-	    [&]() -> shared_ptr<const vector<GlueTableInfo>> {
+	    [&](const Scopes &scopes) -> shared_ptr<const vector<GlueTableInfo>> {
 		    auto list =
 		        make_shared_ptr<const vector<GlueTableInfo>>(GlueAPI::GetTables(context, catalog, database_name));
 		    for (auto &table : *list) {
-			    Seed<GlueTableInfo>(context, catalog, &GlueCachedMetadata::tables,
+			    Seed<GlueTableInfo>(scopes, catalog, &GlueCachedMetadata::tables,
 			                        GlueCachedMetadata::TableKey(database_name, table.name),
 			                        make_shared_ptr<const GlueTableInfo>(table));
 		    }
@@ -189,7 +211,7 @@ shared_ptr<const GlueTableInfo> GlueMetadata::GetTable(ClientContext &context, G
                                                        const string &database_name, const string &table_name) {
 	return Resolve<GlueTableInfo>(context, catalog, &GlueCachedMetadata::tables,
 	                              GlueCachedMetadata::TableKey(database_name, table_name),
-	                              [&]() -> shared_ptr<const GlueTableInfo> {
+	                              [&](const Scopes &) -> shared_ptr<const GlueTableInfo> {
 		                              GlueTableInfo info;
 		                              if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info)) {
 			                              return nullptr;
@@ -213,7 +235,7 @@ shared_ptr<const vector<GluePartitionInfo>> GlueMetadata::GetPartitions(ClientCo
                                                                         const string &table_name) {
 	return Resolve<vector<GluePartitionInfo>>(
 	    context, catalog, &GlueCachedMetadata::partitions, GlueCachedMetadata::TableKey(database_name, table_name),
-	    [&]() -> shared_ptr<const vector<GluePartitionInfo>> {
+	    [&](const Scopes &) -> shared_ptr<const vector<GluePartitionInfo>> {
 		    return make_shared_ptr<const vector<GluePartitionInfo>>(
 		        GlueAPI::GetPartitions(context, catalog, database_name, table_name));
 	    });

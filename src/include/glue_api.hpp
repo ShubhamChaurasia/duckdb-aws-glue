@@ -28,6 +28,7 @@ struct GlueColumn {
 	string type;
 	string comment;
 
+	//! Every field: a field left out here makes a changed definition look unchanged to the metadata cache
 	bool operator==(const GlueColumn &other) const {
 		return name == other.name && type == other.type && comment == other.comment;
 	}
@@ -41,6 +42,7 @@ struct GlueDatabaseInfo {
 	string location_uri;
 	unordered_map<string, string> parameters;
 
+	//! Every field: a field left out here makes a changed definition look unchanged to the metadata cache
 	bool operator==(const GlueDatabaseInfo &other) const {
 		return name == other.name && description == other.description && location_uri == other.location_uri &&
 		       parameters == other.parameters;
@@ -79,6 +81,7 @@ struct GlueTableInfo {
 	string csv_escape;
 
 public:
+	//! Every field: a field left out here makes a changed definition look unchanged to the metadata cache
 	bool operator==(const GlueTableInfo &other) const {
 		return name == other.name && database_name == other.database_name && glue_table_type == other.glue_table_type &&
 		       location == other.location && input_format == other.input_format &&

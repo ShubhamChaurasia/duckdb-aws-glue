@@ -55,6 +55,14 @@ public:
 		entries[lower_key] = Entry {value, clock::now()};
 		return value;
 	}
+	//! Store 'value', replacing what is there: for a value known to be fresher (just listed)
+	void Put(const string &key, shared_ptr<const T> value, clock::duration ttl) {
+		lock_guard<mutex> guard(lock);
+		if (entries.size() >= sweep_at) {
+			Sweep(ttl);
+		}
+		entries[StringUtil::Lower(key)] = Entry {std::move(value), clock::now()};
+	}
 	void Erase(const string &key) {
 		lock_guard<mutex> guard(lock);
 		entries.erase(StringUtil::Lower(key));
@@ -143,6 +151,13 @@ public:
 struct GlueMetadata {
 	//! The setting glue_metadata_cache
 	static bool Enabled(ClientContext &context);
+	//! The scopes a lookup runs in, resolved once per call: the settings and the transaction scope (null during ATTACH)
+	struct Scopes {
+		bool enabled;
+		std::chrono::milliseconds ttl;
+		optional_ptr<GlueTransactionCache> transaction;
+	};
+	static Scopes ResolveScopes(ClientContext &context, GlueCatalog &catalog);
 	//! The database, or null if it does not exist
 	static shared_ptr<const GlueDatabaseInfo> GetDatabase(ClientContext &context, GlueCatalog &catalog,
 	                                                      const string &database_name);
@@ -164,6 +179,11 @@ struct GlueMetadata {
 	//! The partitions of a table as Glue lists them (empty for an unpartitioned table)
 	static shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name, const string &table_name);
+	//! The table definition this transaction already resolved, or null: no network, no global scope. For a listing to
+	//! stay consistent with the lookups of the same transaction.
+	static shared_ptr<const GlueTableInfo> PinnedTable(const Scopes &scopes, const string &database_name,
+	                                                   const string &table_name);
+	static shared_ptr<const GlueDatabaseInfo> PinnedDatabase(const Scopes &scopes, const string &database_name);
 	//! Keep a catalog entry alive until the transaction ends (no-op without one)
 	static void PinEntry(ClientContext &context, GlueCatalog &catalog, shared_ptr<CatalogEntry> entry);
 	//! Forget a table in both scopes, after a change made through this extension
@@ -181,10 +201,11 @@ private:
 	template <class T>
 	static shared_ptr<const T> Resolve(ClientContext &context, GlueCatalog &catalog,
 	                                   GlueCacheMap<T> GlueCachedMetadata::*map, const string &key,
-	                                   const std::function<shared_ptr<const T>()> &load);
-	//! Store what a listing returned under each name, in every scope that is on
+	                                   const std::function<shared_ptr<const T>(const Scopes &)> &load);
+	//! Store what a listing returned under each name: it replaces the global scope's value (a listing is fresher than
+	//! anything cached) and fills, but never replaces, the transaction scope's (the snapshot stands)
 	template <class T>
-	static void Seed(ClientContext &context, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
+	static void Seed(const Scopes &scopes, GlueCatalog &catalog, GlueCacheMap<T> GlueCachedMetadata::*map,
 	                 const string &key, shared_ptr<const T> value);
 };
 

@@ -34,8 +34,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	bool header = false;
 	//! The partition keys, in order
 	vector<string> partition_keys;
-	//! The partitions registered in Glue (empty for an unpartitioned table)
-	vector<GluePartitionInfo> partitions;
+	//! The partitions registered in Glue (empty for an unpartitioned table); shared with the metadata cache, never
+	//! copied
+	const vector<GluePartitionInfo> &Partitions() const {
+		return *partitions;
+	}
+	void SetPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p) {
+		partitions = std::move(partitions_p);
+	}
+	shared_ptr<const vector<GluePartitionInfo>> partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 	//! The partition (index into 'partitions') each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
