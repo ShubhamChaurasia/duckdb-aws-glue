@@ -53,6 +53,13 @@ CREATE MACRO listed_dirs() AS TABLE
     FROM duckdb_logs_parsed('HTTP')
     WHERE request.url LIKE '%list-type=2%';
 
+# The data files opened since the last truncate_duckdb_logs(): the S3 GET requests in the HTTP log, by file
+statement ok
+CREATE MACRO read_files() AS TABLE
+    SELECT DISTINCT url_decode(regexp_extract(request.url, '^([^?]+)', 1)) AS file
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.type = 'GET' AND request.url NOT LIKE '%list-type=2%';
+
 statement ok
 CALL enable_logging('HTTP', storage := 'memory');
 
@@ -72,6 +79,56 @@ SELECT dir FROM listed_dirs() ORDER BY dir;
 ----
 default/pp_orders/dt=2016-05-15/country=IN/
 default/pp_orders/dt=2016-05-15/country=US/
+
+#---------------------------------------------------------------------------
+# dynamic partition pruning tests
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pp_days;
+
+statement ok
+CREATE TABLE my_datalake.default.pp_days (id INTEGER, day_sk INTEGER) PARTITIONED BY (day_sk);
+
+statement ok
+INSERT INTO my_datalake.default.pp_days VALUES (1, 2450815), (2, 2450816), (3, 2450817), (4, 2450817);
+
+statement ok
+CREATE TEMP TABLE wanted_days AS SELECT 2450817 AS d;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_days o, wanted_days w WHERE o.day_sk = w.d;
+----
+2
+
+query I
+SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/%';
+----
+1
+
+query I
+SELECT file LIKE '%/pp_days/day_sk=2450817/%' FROM read_files() WHERE file LIKE '%/pp_days/%';
+----
+true
+
+# a join on a data column has nothing to prune on: every partition is read
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_days o, wanted_days w WHERE o.id = w.d - 2450814;
+----
+1
+
+query I
+SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/%';
+----
+3
+
+statement ok
+DROP TABLE my_datalake.default.pp_days;
 
 #---------------------------------------------------------------------------
 # a filter on both partition keys lists one partition

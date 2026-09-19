@@ -12,6 +12,7 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
@@ -474,45 +475,20 @@ static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expres
 	});
 }
 
-unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
-                                                                     const MultiFileOptions &options,
-                                                                     MultiFilePushdownInfo &pushdown_info,
-                                                                     vector<unique_ptr<Expression>> &filters) {
-	auto &info = ScanInfo();
-	if (info.partition_keys.empty() || filters.empty()) {
-		return nullptr;
-	}
-	// which projected columns are partition keys
-	unordered_map<idx_t, idx_t> projection_to_key;
-	for (idx_t i = 0; i < pushdown_info.column_ids.size(); i++) {
-		auto column_id = pushdown_info.column_ids[i];
-		if (IsVirtualColumn(column_id)) {
-			continue;
-		}
-		auto key_index = info.GetPartitionKeyIndex(pushdown_info.column_names[column_id].GetIdentifierName());
-		if (key_index != DConstants::INVALID_INDEX) {
-			projection_to_key[i] = key_index;
-		}
-	}
-	if (projection_to_key.empty()) {
-		return nullptr;
-	}
-
-	// A filter that can be evaluated with the partition values alone decides whether the partition is read at all,
-	// before its directory is listed. The filters themselves are kept: on the rows that remain they are cheap, the
-	// partition columns are constants.
-	auto &hive_list = files.Cast<HiveMultiFileList>();
-	auto &candidates = hive_list.PartitionIndexes();
+//! The partitions among 'candidates' that no filter rules out, each filter evaluated with the partition's values in
+//! place of its partition columns ('projection_to_key': projected position -> key). A filter that needs data columns is
+//! skipped.
+static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo &info, const vector<idx_t> &candidates,
+                                      TableIndex table_index, const unordered_map<idx_t, idx_t> &projection_to_key,
+                                      const vector<unique_ptr<Expression>> &filters,
+                                      unordered_set<idx_t> &pruning_filters) {
 	vector<idx_t> kept;
-	unordered_set<idx_t> pruning_filters;
 	for (auto partition_index : candidates) {
 		auto &partition = info.partitions[partition_index];
 		bool keep = true;
 		for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-			auto &filter = filters[filter_index];
-			auto filter_copy = filter->Copy();
-			ReplacePartitionColumnRefs(context, filter_copy, pushdown_info.table_index, projection_to_key, info,
-			                           partition);
+			auto filter_copy = filters[filter_index]->Copy();
+			ReplacePartitionColumnRefs(context, filter_copy, table_index, projection_to_key, info, partition);
 			Value result;
 			if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
 			    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
@@ -521,18 +497,61 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 			}
 			if (result.IsNull() || !result.GetValue<bool>()) {
 				keep = false;
-				if (pruning_filters.insert(filter_index).second) {
-					if (!pushdown_info.extra_info.file_filters.empty()) {
-						pushdown_info.extra_info.file_filters += " AND ";
-					}
-					pushdown_info.extra_info.file_filters += filter->ToString();
-				}
+				pruning_filters.insert(filter_index);
 				break;
 			}
 		}
 		if (keep) {
 			kept.push_back(partition_index);
 		}
+	}
+	return kept;
+}
+
+//! Which projected columns ('column_ids' into 'column_names') are partition keys: projected position -> key index
+static unordered_map<idx_t, idx_t> PartitionKeyProjections(const HiveScanInfo &info, const vector<column_t> &column_ids,
+                                                           const vector<Identifier> &column_names) {
+	unordered_map<idx_t, idx_t> projection_to_key;
+	for (idx_t i = 0; i < column_ids.size(); i++) {
+		if (IsVirtualColumn(column_ids[i])) {
+			continue;
+		}
+		auto key_index = info.GetPartitionKeyIndex(column_names[column_ids[i]].GetIdentifierName());
+		if (key_index != DConstants::INVALID_INDEX) {
+			projection_to_key[i] = key_index;
+		}
+	}
+	return projection_to_key;
+}
+
+unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
+                                                                     const MultiFileOptions &options,
+                                                                     MultiFilePushdownInfo &pushdown_info,
+                                                                     vector<unique_ptr<Expression>> &filters) {
+	auto &info = ScanInfo();
+	if (info.partition_keys.empty() || filters.empty()) {
+		return nullptr;
+	}
+	auto projection_to_key = PartitionKeyProjections(info, pushdown_info.column_ids, pushdown_info.column_names);
+	if (projection_to_key.empty()) {
+		return nullptr;
+	}
+	// A filter that can be evaluated with the partition values alone decides whether the partition is read at all,
+	// before its directory is listed. The filters themselves are kept: on the rows that remain they are cheap, the
+	// partition columns are constants.
+	auto &hive_list = files.Cast<HiveMultiFileList>();
+	auto &candidates = hive_list.PartitionIndexes();
+	unordered_set<idx_t> pruning_filters;
+	auto kept = PartitionsToRead(context, info, candidates, pushdown_info.table_index, projection_to_key, filters,
+	                             pruning_filters);
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		if (pruning_filters.find(filter_index) == pruning_filters.end()) {
+			continue;
+		}
+		if (!pushdown_info.extra_info.file_filters.empty()) {
+			pushdown_info.extra_info.file_filters += " AND ";
+		}
+		pushdown_info.extra_info.file_filters += filters[filter_index]->ToString();
 	}
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
 	pushdown_info.extra_info.total_files = candidates.size();
@@ -541,6 +560,39 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 		return nullptr;
 	}
 	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+}
+
+unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const {
+	auto &scan = *scan_info;
+	if (scan.partition_keys.empty() || !info.filters.HasFilters()) {
+		return nullptr;
+	}
+	auto projection_to_key = PartitionKeyProjections(scan, info.column_ids, info.column_names);
+	if (projection_to_key.empty()) {
+		return nullptr;
+	}
+	// The table filters become expressions over the scan's columns, as MultiFileList::DynamicFilterPushdown does
+	TableIndex table_index(0);
+	vector<unique_ptr<Expression>> filters;
+	for (auto &entry : info.filters) {
+		auto filter_index = entry.GetIndex();
+		auto primary_index = info.column_indexes[filter_index].GetPrimaryIndex();
+		if (IsVirtualColumn(primary_index)) {
+			continue;
+		}
+		auto column_ref = make_uniq<BoundColumnRefExpression>(info.column_types[primary_index],
+		                                                      ColumnBinding(table_index, filter_index));
+		auto &filter =
+		    ExpressionFilter::GetExpressionFilter(entry.Filter(), "HiveMultiFileList::DynamicFilterPushdown");
+		filters.push_back(filter.ToExpression(*column_ref));
+	}
+	unordered_set<idx_t> pruning_filters;
+	auto kept = PartitionsToRead(info.context, scan, partition_indexes, table_index, projection_to_key, filters,
+	                             pruning_filters);
+	if (kept.size() == partition_indexes.size()) {
+		return nullptr;
+	}
+	return make_uniq<HiveMultiFileList>(info.context, scan_info, std::move(kept));
 }
 
 //===--------------------------------------------------------------------===//
