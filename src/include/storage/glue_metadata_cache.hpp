@@ -5,6 +5,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include "glue_api.hpp"
 
@@ -15,8 +16,11 @@ namespace duckdb {
 class ClientContext;
 class GlueCatalog;
 
-//! A map of cached values with a time-to-live. Values are shared so a reader can keep one alive after the map has
-//! replaced or dropped it. A value is only ever stored from a successful Glue response; failures leave the map as is.
+//! A map of cached values with a time-to-live. Keys are Glue names, matched case-insensitively (Glue stores them in
+//! lowercase; DuckDB identifiers arrive as typed), so every key is lowercased on the way in. Values are shared so a
+//! reader can keep one alive after the map has replaced or dropped it. A value is only ever stored from a successful
+//! Glue response; failures leave the map as is. Expired entries are swept when the map has doubled since the last
+//! sweep.
 template <class T>
 class GlueCacheMap {
 public:
@@ -25,11 +29,11 @@ public:
 	//! The value for 'key' if present and younger than 'ttl', else null. A zero ttl means never expire.
 	shared_ptr<const T> Get(const string &key, clock::duration ttl) {
 		lock_guard<mutex> guard(lock);
-		auto entry = entries.find(key);
+		auto entry = entries.find(StringUtil::Lower(key));
 		if (entry == entries.end()) {
 			return nullptr;
 		}
-		if (ttl.count() > 0 && clock::now() - entry->second.loaded_at > ttl) {
+		if (Expired(entry->second, ttl)) {
 			entries.erase(entry);
 			return nullptr;
 		}
@@ -40,24 +44,27 @@ public:
 	//! entry) is not rebuilt for a definition that did not change.
 	shared_ptr<const T> PutIfAbsent(const string &key, shared_ptr<const T> value, clock::duration ttl) {
 		lock_guard<mutex> guard(lock);
-		auto entry = entries.find(key);
-		if (entry != entries.end()) {
-			if (ttl.count() == 0 || clock::now() - entry->second.loaded_at <= ttl) {
-				return entry->second.value;
-			}
+		auto lower_key = StringUtil::Lower(key);
+		auto entry = entries.find(lower_key);
+		if (entry != entries.end() && !Expired(entry->second, ttl)) {
+			return entry->second.value;
 		}
-		entries[key] = Entry {value, clock::now()};
+		if (entries.size() >= sweep_at) {
+			Sweep(ttl);
+		}
+		entries[lower_key] = Entry {value, clock::now()};
 		return value;
 	}
 	void Erase(const string &key) {
 		lock_guard<mutex> guard(lock);
-		entries.erase(key);
+		entries.erase(StringUtil::Lower(key));
 	}
 	//! Drop every entry whose key starts with 'prefix' (all tables of a database)
 	void ErasePrefix(const string &prefix) {
 		lock_guard<mutex> guard(lock);
+		auto lower_prefix = StringUtil::Lower(prefix);
 		for (auto it = entries.begin(); it != entries.end();) {
-			if (it->first.compare(0, prefix.size(), prefix) == 0) {
+			if (it->first.compare(0, lower_prefix.size(), lower_prefix) == 0) {
 				it = entries.erase(it);
 			} else {
 				++it;
@@ -74,8 +81,21 @@ private:
 		shared_ptr<const T> value;
 		clock::time_point loaded_at;
 	};
+	static bool Expired(const Entry &entry, clock::duration ttl) {
+		return ttl.count() > 0 && clock::now() - entry.loaded_at > ttl;
+	}
+	//! Drop expired entries; the next sweep comes when the map has doubled. Caller holds the lock.
+	void Sweep(clock::duration ttl) {
+		for (auto it = entries.begin(); it != entries.end();) {
+			it = Expired(it->second, ttl) ? entries.erase(it) : std::next(it);
+		}
+		sweep_at = MaxValue<idx_t>(entries.size() * 2, MINIMUM_SWEEP);
+	}
+
+	static constexpr idx_t MINIMUM_SWEEP = 64;
 	mutex lock;
 	unordered_map<string, Entry> entries;
+	idx_t sweep_at = MINIMUM_SWEEP;
 };
 
 //! The Glue metadata one scope holds: databases, the list of databases, the tables of a database, a table's
@@ -97,11 +117,12 @@ struct GlueCachedMetadata {
 	static string TableKey(const string &database_name, const string &table_name);
 };
 
-//! The statement scope. Lives in the GlueTransaction, so it is destroyed when the statement (or the explicit
-//! transaction) ends. What a statement resolved once it keeps for its whole duration: no time-to-live.
-struct GlueStatementCache : public GlueCachedMetadata {
-	//! Keep a catalog entry alive for the statement: DuckDB holds entries by reference, and the entry sets replace an
-	//! entry when its definition is reloaded
+//! The transaction scope. Lives in the GlueTransaction — one statement in autocommit, everything between BEGIN and
+//! COMMIT otherwise — and is destroyed with it. What the transaction resolved once it keeps for its whole duration, so
+//! a table dropped or written elsewhere stays as first seen until the transaction ends: no time-to-live.
+struct GlueTransactionCache : public GlueCachedMetadata {
+	//! Keep a catalog entry alive for the transaction: DuckDB holds entries by reference, and the entry sets replace
+	//! an entry when its definition changes
 	void PinEntry(shared_ptr<CatalogEntry> entry);
 
 private:
@@ -116,8 +137,8 @@ public:
 	static std::chrono::milliseconds TTL(ClientContext &context);
 };
 
-//! Cache-aware lookups. Each resolves statement scope, then global scope, then Glue, and stores a successful answer in
-//! both. The statement scope is skipped when the catalog has no transaction yet (during ATTACH). With the setting
+//! Cache-aware lookups. Each resolves transaction scope, then global scope, then Glue, and stores a successful answer
+//! in both. The transaction scope is skipped when the catalog has no transaction yet (during ATTACH). With the setting
 //! glue_metadata_cache off, every lookup goes to Glue and nothing is stored.
 struct GlueMetadata {
 	//! The setting glue_metadata_cache
@@ -143,7 +164,7 @@ struct GlueMetadata {
 	//! The partitions of a table as Glue lists them (empty for an unpartitioned table)
 	static shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name, const string &table_name);
-	//! Keep a catalog entry alive until the statement ends (no-op without a transaction)
+	//! Keep a catalog entry alive until the transaction ends (no-op without one)
 	static void PinEntry(ClientContext &context, GlueCatalog &catalog, shared_ptr<CatalogEntry> entry);
 	//! Forget a table in both scopes, after a change made through this extension
 	static void InvalidateTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -154,8 +175,8 @@ struct GlueMetadata {
 	static void Clear(ClientContext &context, GlueCatalog &catalog);
 
 private:
-	static optional_ptr<GlueStatementCache> StatementScope(ClientContext &context, GlueCatalog &catalog);
-	//! Statement scope, then global scope, then 'load' (which returns null for "does not exist"); a loaded value is
+	static optional_ptr<GlueTransactionCache> TransactionScope(ClientContext &context, GlueCatalog &catalog);
+	//! Transaction scope, then global scope, then 'load' (which returns null for "does not exist"); a loaded value is
 	//! stored in every scope that is on
 	template <class T>
 	static shared_ptr<const T> Resolve(ClientContext &context, GlueCatalog &catalog,

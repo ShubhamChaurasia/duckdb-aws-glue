@@ -17,7 +17,6 @@
 
 #include "glue_types.hpp"
 #include "storage/glue_catalog.hpp"
-#include "storage/glue_metadata_cache.hpp"
 
 namespace duckdb {
 
@@ -295,9 +294,9 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 	auto &alter_table = info.Cast<AlterTableInfo>();
 
-	// Work on the table definition as resolved now, not the copy the entry was built from
+	// Read-modify-write: start from what Glue has now, not from a cached definition
 	GlueTableInfo current;
-	if (!GlueMetadata::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}

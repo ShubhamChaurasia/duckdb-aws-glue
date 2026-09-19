@@ -24,9 +24,9 @@ public:
 
 public:
 	GlueCatalog &glue_catalog;
-	//! Glue metadata this transaction resolved: kept for the whole statement (or explicit transaction) so every
-	//! reference to a table sees the same definition and partitions
-	GlueStatementCache statement_cache;
+	//! Glue metadata this transaction resolved: kept for its whole duration so every reference to a table sees the same
+	//! definition and partitions
+	GlueTransactionCache transaction_cache;
 
 private:
 	GlueTransactionState transaction_state;

@@ -38,8 +38,9 @@ void GlueTableSet::SetTableTypeTag(GlueTable &entry) {
 
 GlueTable &GlueTableSet::EntryFor(ClientContext &context, const shared_ptr<const GlueTableInfo> &table) {
 	auto existing = entries.find(table->name);
-	if (existing == entries.end() || existing->second.source != table) {
-		// first sight of this table, or the cache holds a newer definition: (re)build the entry from it
+	if (existing == entries.end() || !(*existing->second.source == *table)) {
+		// first sight of this table, or its definition changed: (re)build the entry. Compared by content, so a reload
+		// that returned the same definition keeps the entry (and every reference DuckDB holds to it)
 		Slot slot;
 		slot.entry = CreateTableEntry(*table);
 		slot.source = table;
@@ -66,18 +67,12 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 
 void GlueTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
 	auto tables = GlueMetadata::GetTables(context, catalog, schema.database_info.name);
-	// the listing seeded the per-name cache, so these are served from it (and are the same objects a lookup by name
-	// returns); resolved before taking the lock so it is never held across a Glue call
-	auto cached = GlueMetadata::Enabled(context);
+	// entries are compared with their definition by content, so the listing's own copies serve; no per-name lookup
 	vector<shared_ptr<const GlueTableInfo>> definitions;
 	case_insensitive_set_t listed;
 	for (auto &table : *tables) {
 		listed.insert(table.name);
-		auto definition = cached ? GlueMetadata::GetTable(context, catalog, schema.database_info.name, table.name)
-		                         : make_shared_ptr<const GlueTableInfo>(table);
-		if (definition) {
-			definitions.push_back(std::move(definition));
-		}
+		definitions.push_back(make_shared_ptr<const GlueTableInfo>(table));
 	}
 	vector<reference<GlueTable>> visible;
 	{

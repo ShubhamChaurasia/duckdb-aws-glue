@@ -40,6 +40,15 @@ Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet`
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
 
+Glue metadata — databases, table lists, table definitions and partition lists — is cached in two scopes. Within a
+transaction (one statement in autocommit) every reference to a table sees the same definition and partitions, and a
+table referenced twice is resolved once. Across transactions an entry is kept for `glue_metadata_global_cache_ttl_millis`
+(default 300000, five minutes; 0 keeps metadata for the transaction only). Changes made through this extension (DDL,
+`INSERT`, the `glue_*` partition functions) invalidate the cache; changes made elsewhere are seen once the entry expires
+or after `CALL glue_flush_cache('catalog')`, `('catalog', 'database')` or `('catalog', 'database', 'table')`. Only
+successful responses are cached, so a table that did not exist is found as soon as it does. `SET glue_metadata_cache =
+false` turns both scopes off and asks Glue on every reference.
+
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
 from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by

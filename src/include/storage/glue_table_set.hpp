@@ -42,6 +42,9 @@ private:
 		//! the definition the entry was built from
 		shared_ptr<const GlueTableInfo> source;
 	};
+	//! Held by reference, as every GlueTable holds it: safe because a table entry is only ever reached through its
+	//! schema entry, which the same transaction pinned first (GlueSchemaSet::EntryFor). A new path to a table must keep
+	//! that order.
 	GlueSchemaEntry &schema;
 	GlueCatalog &catalog;
 	mutex entry_lock;

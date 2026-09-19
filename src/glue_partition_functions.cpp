@@ -57,8 +57,9 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	}
 	GluePartitionTarget result;
 	result.catalog = &catalog->Cast<GlueCatalog>();
-	if (!GlueMetadata::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
-	                            qualified.Name().GetIdentifierName(), result.table)) {
+	// the target of a change (or of glue_partitions, which lists fresh): read from Glue, not from the cache
+	if (!GlueAPI::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
+	                       qualified.Name().GetIdentifierName(), result.table)) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'",
 		                       qualified.Schema().GetIdentifierName(), qualified.Name().GetIdentifierName(),
 		                       qualified.Catalog().GetIdentifierName());

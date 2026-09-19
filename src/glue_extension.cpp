@@ -60,16 +60,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("glue_metadata_cache",
-	                          "Cache Glue metadata (databases, tables, partitions): within a statement always, and "
-	                          "across statements for glue_metadata_global_cache_ttl_millis. Changes made through "
+	                          "Cache Glue metadata (databases, tables, partitions): within a transaction always (one "
+	                          "statement in autocommit), and across transactions for "
+	                          "glue_metadata_global_cache_ttl_millis. Changes made through "
 	                          "this extension invalidate the cache; changes made elsewhere are seen once the entry "
 	                          "expires or after CALL glue_flush_cache. Default true; false asks Glue on every "
 	                          "reference.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("glue_metadata_global_cache_ttl_millis",
-	                          "How long Glue metadata is kept across statements, in milliseconds. Default 300000 "
-	                          "(5 minutes). 0 keeps metadata for the statement only.",
+	                          "How long Glue metadata is kept across transactions, in milliseconds. Default 300000 "
+	                          "(5 minutes). 0 keeps metadata for the transaction only.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(300000));
 
 	config.AddExtensionOption("hive_partition_listing_threshold",

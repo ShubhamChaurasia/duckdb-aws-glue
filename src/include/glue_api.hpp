@@ -27,6 +27,10 @@ struct GlueColumn {
 	//! The Glue (Hive style) type string, e.g. 'int', 'decimal(10,2)', 'array<string>'
 	string type;
 	string comment;
+
+	bool operator==(const GlueColumn &other) const {
+		return name == other.name && type == other.type && comment == other.comment;
+	}
 };
 
 //! A Glue "Database", exposed as a DuckDB schema
@@ -36,6 +40,11 @@ struct GlueDatabaseInfo {
 	//! Optional S3 location tables of this database default to
 	string location_uri;
 	unordered_map<string, string> parameters;
+
+	bool operator==(const GlueDatabaseInfo &other) const {
+		return name == other.name && description == other.description && location_uri == other.location_uri &&
+		       parameters == other.parameters;
+	}
 };
 
 //! The file format of a Hive table's data files, decided by its SerDe
@@ -70,6 +79,15 @@ struct GlueTableInfo {
 	string csv_escape;
 
 public:
+	bool operator==(const GlueTableInfo &other) const {
+		return name == other.name && database_name == other.database_name && glue_table_type == other.glue_table_type &&
+		       location == other.location && input_format == other.input_format &&
+		       output_format == other.output_format && serde_library == other.serde_library &&
+		       serde_parameters == other.serde_parameters && columns == other.columns &&
+		       partition_keys == other.partition_keys && parameters == other.parameters &&
+		       file_format == other.file_format && csv_delimiter == other.csv_delimiter &&
+		       csv_quote == other.csv_quote && csv_escape == other.csv_escape;
+	}
 	//! Derive the open table format from the table parameters
 	GlueTableFormat GetFormat() const;
 	//! Human readable description of the table type, used in error messages

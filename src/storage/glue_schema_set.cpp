@@ -21,8 +21,9 @@ unique_ptr<GlueSchemaEntry> GlueSchemaSet::CreateSchemaEntry(const GlueDatabaseI
 
 GlueSchemaEntry &GlueSchemaSet::EntryFor(ClientContext &context, const shared_ptr<const GlueDatabaseInfo> &database) {
 	auto existing = entries.find(database->name);
-	if (existing == entries.end() || existing->second.source != database) {
-		// first sight of this database, or the cache holds a newer definition: (re)build the entry from it
+	if (existing == entries.end() || !(*existing->second.source == *database)) {
+		// first sight of this database, or its definition changed: (re)build the entry, which drops its table set.
+		// Compared by content, so a reload that returned the same definition keeps the entry and its tables
 		Slot slot;
 		slot.entry = CreateSchemaEntry(*database);
 		slot.source = database;
@@ -48,18 +49,12 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
 	auto databases = GlueMetadata::GetDatabases(context, catalog);
-	// the listing seeded the per-name cache, so these are served from it (and are the same objects a lookup by name
-	// returns); resolved before taking the lock so it is never held across a Glue call
-	auto cached = GlueMetadata::Enabled(context);
+	// entries are compared with their definition by content, so the listing's own copies serve; no per-name lookup
 	vector<shared_ptr<const GlueDatabaseInfo>> definitions;
 	case_insensitive_set_t listed;
 	for (auto &database : *databases) {
 		listed.insert(database.name);
-		auto definition = cached ? GlueMetadata::GetDatabase(context, catalog, database.name)
-		                         : make_shared_ptr<const GlueDatabaseInfo>(database);
-		if (definition) {
-			definitions.push_back(std::move(definition));
-		}
+		definitions.push_back(make_shared_ptr<const GlueDatabaseInfo>(database));
 	}
 	vector<reference<GlueSchemaEntry>> visible;
 	{
