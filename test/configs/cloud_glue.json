@@ -32,8 +32,8 @@
 		{
 			"reason": "glue_repair_table (MSCK REPAIR TABLE) is not implemented yet",
 			"paths": [
-				"test/sql/hive/ddl/alter_partition/msck_repair_table.test",
-				"test/sql/hive/ddl/alter_partition/show_partitions.test"
+				"test/sql/hive/ddl/alter_partition/glue_repair_table.test",
+				"test/sql/hive/ddl/alter_partition/test_show_partitions.test"
 			]
 		}
 	]
