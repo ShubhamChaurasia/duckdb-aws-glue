@@ -1,0 +1,207 @@
+# name: test/sql/hive/read_only.test
+# description: ATTACH ... (READ_ONLY) refuses everything that would change the Glue catalog, through statements and
+#              through the glue_* table functions, and keeps reads working
+# group: [hive]
+
+# Statements are refused by DuckDB itself: the binder records the databases a statement modifies and
+# ClientContext checks them against the attachment. Table functions are bound and executed like a scan, so a
+# glue_* function that mutates Glue is invisible to that check and the extension has to refuse it itself.
+# Both halves are covered here; every refusal is followed by an assertion, read through a second writable
+# attachment, that nothing reached Glue.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# a writable attachment, used to set up and to observe whether anything landed
+statement ok
+attach '{GLUE_CATALOG_ID}' as rw_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS rw_datalake.default.ro_orders;
+
+statement ok
+CREATE TABLE rw_datalake.default.ro_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO rw_datalake.default.ro_orders VALUES (1, 10.0);
+
+# a partitioned table, so the partition functions have a real target
+statement ok
+DROP TABLE IF EXISTS rw_datalake.default.ro_parts;
+
+statement ok
+CREATE TABLE rw_datalake.default.ro_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO rw_datalake.default.ro_parts VALUES (1, 'keep');
+
+query I
+SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+1
+
+# the attachment under test
+statement ok
+attach '{GLUE_CATALOG_ID}' as ro_datalake (
+    TYPE glue,
+    READ_ONLY,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# ===========================================================================
+# reads keep working
+# ===========================================================================
+query II
+SELECT id, amount FROM ro_datalake.default.ro_orders;
+----
+1	10.0
+
+query I
+SELECT count(*) FROM glue_partitions('ro_datalake.default.ro_parts');
+----
+1
+
+query I
+SELECT count(*) FROM glue_get_table_response('ro_datalake.default.ro_parts');
+----
+1
+
+# ===========================================================================
+# statements that modify the catalog
+# ===========================================================================
+statement error
+INSERT INTO ro_datalake.default.ro_orders VALUES (2, 20.0);
+----
+read-only mode
+
+statement error
+CREATE TABLE ro_datalake.default.ro_new (id INTEGER);
+----
+read-only mode
+
+statement error
+ALTER TABLE ro_datalake.default.ro_orders ADD COLUMN extra INTEGER;
+----
+read-only mode
+
+statement error
+CREATE SCHEMA ro_datalake.ro_schema;
+----
+read-only mode
+
+statement error
+DROP TABLE ro_datalake.default.ro_orders;
+----
+read-only mode
+
+# nothing above reached Glue
+query I
+SELECT count(*) FROM rw_datalake.default.ro_orders;
+----
+1
+
+query I
+SELECT count(*) FROM (DESCRIBE rw_datalake.default.ro_orders);
+----
+2
+
+# ===========================================================================
+# glue_* table functions that modify the catalog
+# ===========================================================================
+
+statement error
+CALL glue_add_partition('ro_datalake.default.ro_parts', {dt: 'injected'});
+----
+Cannot execute glue_add_partition on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+1
+
+# repoints the whole table at another prefix
+statement error
+CALL glue_set_table_location('ro_datalake.default.ro_parts', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/hijacked');
+----
+Cannot execute glue_set_table_location on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT location LIKE '%/hijacked' FROM glue_get_table_response('rw_datalake.default.ro_parts');
+----
+false
+
+statement error
+CALL glue_set_partition_location('ro_datalake.default.ro_parts', {dt: 'keep'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved');
+----
+Cannot execute glue_set_partition_location on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT location LIKE '%/moved' FROM glue_partitions('rw_datalake.default.ro_parts') WHERE dt = 'keep';
+----
+false
+
+statement error
+CALL glue_rename_partition('ro_datalake.default.ro_parts', {dt: 'keep'}, {dt: 'renamed'});
+----
+Cannot execute glue_rename_partition on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT dt FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+keep
+
+# the multi-action form, and what the ALTER TABLE grammar extension lowers to
+statement error
+CALL glue_alter_table('ro_datalake.default.ro_parts',
+    [{action: 'add', if_not_exists: true, if_exists: NULL::BOOLEAN,
+      partition: [{key: 'dt', value: 'via_alter'}],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: NULL::VARCHAR}]);
+----
+Cannot execute glue_alter_table on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+1
+
+# destructive, so last
+statement error
+CALL glue_drop_partition('ro_datalake.default.ro_parts', {dt: 'keep'});
+----
+Cannot execute glue_drop_partition on database "ro_datalake" which is attached in read-only mode!
+
+query I
+SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+1
+
+query I
+SELECT count(*) FROM rw_datalake.default.ro_parts;
+----
+1
+
+# ===========================================================================
+# the refusal is per attachment, not per table: the same tables are still
+# writable through the writable attachment
+# ===========================================================================
+statement ok
+CALL glue_add_partition('rw_datalake.default.ro_parts', {dt: 'added'});
+
+query I
+SELECT count(*) FROM glue_partitions('rw_datalake.default.ro_parts');
+----
+2
+
+statement ok
+DROP TABLE rw_datalake.default.ro_orders;
+
+statement ok
+DROP TABLE rw_datalake.default.ro_parts;

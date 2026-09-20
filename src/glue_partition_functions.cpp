@@ -30,8 +30,14 @@ struct GluePartitionTarget {
 	}
 };
 
+//! Whether a glue_* function is going to change the Glue catalog. Required rather than defaulted, so that adding a
+//! function forces the question to be answered: a mutating one must be refused on a READ_ONLY attachment, and DuckDB
+//! cannot do that for us. A table function is bound and executed like a scan, so the binder's read-only check --
+//! which does stop INSERT / CREATE / ALTER / DROP -- never sees these at all.
+enum class GlueWriteIntent { READS, WRITES };
+
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
-                                     bool require_partitions = true) {
+                                     GlueWriteIntent intent, bool require_partitions = true) {
 	auto qualified = QualifiedName::Parse(table_name.GetValue<string>());
 	if (qualified.Catalog().empty() || qualified.Schema().empty()) {
 		// a partially qualified name: resolve it the way a query would (search path, default catalog)
@@ -55,6 +61,13 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	}
 	GluePartitionTarget result;
 	result.catalog = &catalog->Cast<GlueCatalog>();
+	// Refuse before touching Glue at all, so a rejected call has no partial effect. Same exception type and
+	// phrasing as DuckDB's own read-only refusal (client_context.cpp), so a statement and a glue_* call on a
+	// read-only attachment fail the same way.
+	if (intent == GlueWriteIntent::WRITES && result.catalog->access_mode == AccessMode::READ_ONLY) {
+		throw InvalidInputException("Cannot execute %s on database \"%s\" which is attached in read-only mode!",
+		                            function_name, qualified.Catalog().GetIdentifierName());
+	}
 	if (!GlueAPI::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
 	                       qualified.Name().GetIdentifierName(), result.table)) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'",
@@ -236,7 +249,7 @@ struct GluePartitionsState : public GlobalTableFunctionState {
 unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionsBindData>();
-	result->target = ResolveGlueTable(context, "glue_partitions", input.inputs[0]);
+	result->target = ResolveGlueTable(context, "glue_partitions", input.inputs[0], GlueWriteIntent::READS);
 	auto &table = result->target.table;
 	for (auto &key : table.partition_keys) {
 		auto type = GlueTypes::ToLogicalType(key.type);
@@ -279,7 +292,7 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 unique_ptr<FunctionData> GlueAddPartitionBind(ClientContext &context, TableFunctionBindInput &input,
                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0]);
+	result->target = ResolveGlueTable(context, "glue_add_partition", input.inputs[0], GlueWriteIntent::WRITES);
 	result->values = ParsePartitionSpec("glue_add_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -324,7 +337,7 @@ void GlueAddPartitionScan(ClientContext &context, TableFunctionInput &data, Data
 unique_ptr<FunctionData> GlueDropPartitionBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0]);
+	result->target = ResolveGlueTable(context, "glue_drop_partition", input.inputs[0], GlueWriteIntent::WRITES);
 	result->values = ParsePartitionSpec("glue_drop_partition", result->target, input.inputs[1]);
 	for (auto &option : input.named_parameters) {
 		auto name = StringUtil::Lower(option.first.GetIdentifierName());
@@ -361,7 +374,7 @@ void GlueDropPartitionScan(ClientContext &context, TableFunctionInput &data, Dat
 unique_ptr<FunctionData> GlueRenamePartitionBind(ClientContext &context, TableFunctionBindInput &input,
                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0]);
+	result->target = ResolveGlueTable(context, "glue_rename_partition", input.inputs[0], GlueWriteIntent::WRITES);
 	result->values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[1]);
 	result->new_values = ParsePartitionSpec("glue_rename_partition", result->target, input.inputs[2]);
 	names = {"location"};
@@ -410,7 +423,8 @@ string ParseLocation(const string &function_name, const Value &location) {
 unique_ptr<FunctionData> GlueSetPartitionLocationBind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0]);
+	result->target =
+	    ResolveGlueTable(context, "glue_set_partition_location", input.inputs[0], GlueWriteIntent::WRITES);
 	result->values = ParsePartitionSpec("glue_set_partition_location", result->target, input.inputs[1]);
 	result->location = ParseLocation("glue_set_partition_location", input.inputs[2]);
 	names = {"location"};
@@ -435,7 +449,8 @@ void GlueSetPartitionLocationScan(ClientContext &context, TableFunctionInput &da
 unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GluePartitionChangeBindData>();
-	result->target = ResolveGlueTable(context, "glue_set_table_location", input.inputs[0], false);
+	result->target =
+	    ResolveGlueTable(context, "glue_set_table_location", input.inputs[0], GlueWriteIntent::WRITES, false);
 	result->location = ParseLocation("glue_set_table_location", input.inputs[1]);
 	names = {"location"};
 	return_types = {LogicalType::VARCHAR};
@@ -526,7 +541,8 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 			needs_partitions = true;
 		}
 	}
-	result->target = ResolveGlueTable(context, "glue_alter_table", input.inputs[0], needs_partitions);
+	result->target =
+	    ResolveGlueTable(context, "glue_alter_table", input.inputs[0], GlueWriteIntent::WRITES, needs_partitions);
 	for (auto &action : ListValue::GetChildren(actions)) {
 		if (action.IsNull() || action.type().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("glue_alter_table: every action must be a struct");
