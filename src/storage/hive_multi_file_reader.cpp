@@ -4,6 +4,8 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -344,6 +346,34 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
 }
 
+//! Serializes what identifies the scan; the file list is not written, so serializing does not list
+static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
+                              const TableFunction &function) {
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto &info = list.ScanInfo();
+	serializer.WriteProperty(100, "catalog", info.catalog_name);
+	serializer.WriteProperty(101, "database", info.database_name);
+	serializer.WriteProperty(102, "table", info.table_name);
+	serializer.WriteProperty(103, "location", info.root_location);
+	// by value: an index into Glue's partition list means nothing elsewhere
+	vector<vector<string>> partitions;
+	vector<string> locations;
+	for (auto index : list.PartitionIndexes()) {
+		partitions.push_back(info.partitions[index].values);
+		locations.push_back(info.partitions[index].location);
+	}
+	serializer.WriteProperty(104, "partitions", partitions);
+	serializer.WriteProperty(105, "partition_locations", locations);
+	serializer.WriteProperty(106, "types", bind_data.types);
+	serializer.WriteProperty(107, "names", bind_data.names);
+}
+
+//! Never called: the optimizer serializes to compare plans, it does not deserialize (the plan verifier tolerates this)
+static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+	throw NotImplementedException("A Hive table scan can not be deserialized; plan the query again");
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -388,6 +418,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
+	scan_function.serialize = HiveScanSerialize;
+	scan_function.deserialize = HiveScanDeserialize;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
