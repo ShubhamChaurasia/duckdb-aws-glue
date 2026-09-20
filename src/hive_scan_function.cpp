@@ -219,6 +219,8 @@ TableFunction GetHiveScanFunction(DatabaseInstance &db) {
 	function.bind = HiveScanBind;
 	function.bind_replace = nullptr;
 	function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
+	function.cardinality = HiveScanCardinality;
+	function.table_scan_progress = HiveScanProgress;
 	function.function_info = nullptr;
 	// the bind data holds a reader with state that a serialized plan can not carry
 	function.serialize = nullptr;

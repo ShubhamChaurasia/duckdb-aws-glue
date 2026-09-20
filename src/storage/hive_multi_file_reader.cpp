@@ -4,6 +4,7 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
+#include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
@@ -284,10 +285,16 @@ FileExpandResult HiveMultiFileList::GetExpandResult() const {
 }
 
 MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
-	// The optimizer asks for a rough file count to estimate the cardinality. Listing the partitions for that would
-	// make planning (and EXPLAIN) pay for the listing; answer with what is known and at least one file per partition
-	// still to list.
+	// list until min_exact_count files are known; below that one file per partition still to list is the estimate
 	lock_guard<mutex> lck(lock);
+	while (!all_files_expanded && expanded_files.size() < min_exact_count) {
+		if (client_context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		if (!ExpandNextPath()) {
+			all_files_expanded = true;
+		}
+	}
 	if (all_files_expanded) {
 		return MultiFileCount(expanded_files.size(), FileExpansionType::ALL_FILES_EXPANDED);
 	}
@@ -374,6 +381,49 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	throw NotImplementedException("A Hive table scan can not be deserialized; plan the query again");
 }
 
+//! From the estimate: the default asks for 500 exact files, which lists
+unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &data = bind_data_p->Cast<MultiFileBindData>();
+	auto count = data.file_list->GetFileCount(0);
+	return data.interface->GetCardinality(context, data, count.count);
+}
+
+//! From the estimate: the default asks for an exact count, which lists every remaining partition
+double HiveScanProgress(ClientContext &context, const FunctionData *bind_data_p,
+                        const GlobalTableFunctionState *global_state) {
+	auto &gstate = global_state->Cast<MultiFileGlobalState>();
+	auto count = gstate.file_list.GetFileCount(0);
+	if (count.count == 0) {
+		return 100.0;
+	}
+	// the estimate is a lower bound, so no full bar until the count is exact
+	const double cap = count.type == FileExpansionType::ALL_FILES_EXPANDED ? 100.0 : 99.0;
+	// copied from MultiFileProgress: completed files plus the progress within the open ones, advancing
+	// completed_file_index
+	unique_lock<mutex> parallel_lock(gstate.lock);
+	double total_progress = 100.0 * static_cast<double>(gstate.completed_file_index);
+	for (idx_t i = gstate.completed_file_index; i <= gstate.file_index && i < gstate.readers.size(); i++) {
+		auto &reader_data_ptr = gstate.readers[i];
+		if (!reader_data_ptr) {
+			continue;
+		}
+		auto &reader_data = *reader_data_ptr;
+		double progress_in_file = 0.0;
+		if (reader_data.file_state == MultiFileFileState::OPEN) {
+			progress_in_file = reader_data.reader->GetProgressInFile(context);
+		} else if (reader_data.file_state == MultiFileFileState::CLOSED) {
+			auto reader = reader_data.closed_reader.lock();
+			progress_in_file = reader ? reader->GetProgressInFile(context) : 100.0;
+		}
+		progress_in_file = MaxValue<double>(0.0, MinValue<double>(100.0, progress_in_file));
+		total_progress += progress_in_file;
+		if (i == gstate.completed_file_index && progress_in_file >= 100) {
+			gstate.completed_file_index++;
+		}
+	}
+	return MinValue<double>(cap, total_progress / static_cast<double>(count.count));
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -420,6 +470,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
 	scan_function.serialize = HiveScanSerialize;
 	scan_function.deserialize = HiveScanDeserialize;
+	scan_function.cardinality = HiveScanCardinality;
+	scan_function.table_scan_progress = HiveScanProgress;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;

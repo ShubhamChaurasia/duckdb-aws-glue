@@ -212,7 +212,7 @@ SELECT count(*), count(DISTINCT dir) FROM listed_dirs();
 ----
 7	7
 
-# and so does a full scan
+# and so does a full scan (with the progress bar on, as in this runner: it must not force the listing either)
 statement ok
 CALL truncate_duckdb_logs();
 

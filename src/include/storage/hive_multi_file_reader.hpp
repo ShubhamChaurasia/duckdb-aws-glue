@@ -70,7 +70,7 @@ public:
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
-	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
+	//! Lists until min_exact_count files are known, otherwise estimates
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
@@ -119,6 +119,11 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
+
+//! Cardinality and progress from the estimate, without listing
+unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);
+double HiveScanProgress(ClientContext &context, const FunctionData *bind_data_p,
+                        const GlobalTableFunctionState *global_state);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their
 //! directory names), binds the schema Glue defines rather than the schema of the first file (a column missing from a
