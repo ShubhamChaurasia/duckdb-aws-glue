@@ -265,12 +265,11 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 			Value value = k < partition.values.size()
 			                  ? PartitionValueToValue(context, partition.values[k], bind_data.key_types[k])
 			                  : Value(bind_data.key_types[k]);
-			output.SetValue(k, count, value);
+			output.data[k].Append(value);
 		}
-		output.SetValue(keys.size(), count, Value(partition.location));
+		output.data[keys.size()].Append(Value(partition.location));
 		count++;
 	}
-	output.SetCardinality(count);
 }
 
 //===--------------------------------------------------------------------===//
@@ -474,6 +473,25 @@ struct GlueAlterTableBindData : public TableFunctionData {
 	vector<GlueAlterStep> steps;
 };
 
+//! glue_alter_table reports one row per action and an ALTER TABLE may carry more actions than a DataChunk
+//! holds, so the rows are collected once when the actions are applied and then paged out. Its own state
+//! rather than GluePartitionChangeState, which the single-row functions share and which needs no offset.
+struct GlueAlterTableState : public GlobalTableFunctionState {
+	struct EmittedRow {
+		Value action;
+		Value partition;
+		Value location;
+	};
+	vector<EmittedRow> rows;
+	idx_t offset = 0;
+	//! the Glue calls happen on the first scan only; the later ones just hand out the remaining rows
+	bool applied = false;
+};
+
+unique_ptr<GlobalTableFunctionState> GlueAlterTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<GlueAlterTableState>();
+}
+
 //! A struct field by name (case-insensitive), NULL if the struct has no such field
 Value GetStructField(const Value &value, const string &field_name) {
 	auto &types = StructType::GetChildTypes(value.type());
@@ -585,12 +603,10 @@ string DescribeAction(GlueAlterAction action) {
 	return "unknown";
 }
 
-void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
-	auto &state = data.global_state->Cast<GluePartitionChangeState>();
-	if (state.done) {
-		return;
-	}
-	state.done = true;
+//! Apply every action, once, and record the row each one reports. Kept separate from emitting them because
+//! there can be more actions than a DataChunk holds, so the rows are handed out over several scan calls
+//! while the Glue calls must happen exactly once.
+void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueAlterTableState &state) {
 	auto &bind_data = data.bind_data->Cast<GlueAlterTableBindData>();
 	auto &catalog = *bind_data.target.catalog;
 	auto &table = bind_data.target.table;
@@ -632,13 +648,12 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 	}
 
 	// consecutive adds go out as one BatchCreatePartition call
-	idx_t row = 0;
 	auto emit = [&](const GlueAlterStep &step) {
-		output.SetValue(0, row, Value(DescribeAction(step.action)));
-		output.SetValue(1, row,
-		                step.values.empty() ? Value(LogicalType::VARCHAR) : Value(StringUtil::Join(step.values, ", ")));
-		output.SetValue(2, row, step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location));
-		row++;
+		GlueAlterTableState::EmittedRow row;
+		row.action = Value(DescribeAction(step.action));
+		row.partition = step.values.empty() ? Value(LogicalType::VARCHAR) : Value(StringUtil::Join(step.values, ", "));
+		row.location = step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location);
+		state.rows.push_back(std::move(row));
 	};
 	vector<GluePartitionInput> pending_adds;
 	auto flush_adds = [&]() {
@@ -677,7 +692,23 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 		emit(step);
 	}
 	flush_adds();
-	output.SetCardinality(row);
+}
+
+void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueAlterTableState>();
+	if (!state.applied) {
+		state.applied = true;
+		GlueAlterTableApply(context, data, state);
+	}
+	// one row per action, so there can be more rows than a chunk holds: page them out
+	idx_t count = 0;
+	while (state.offset < state.rows.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &row = state.rows[state.offset++];
+		output.data[0].Append(row.action);
+		output.data[1].Append(row.partition);
+		output.data[2].Append(row.location);
+		count++;
+	}
 }
 
 } // namespace
@@ -724,7 +755,7 @@ TableFunction GetGlueSetTableLocationFunction() {
 
 TableFunction GetGlueAlterTableFunction() {
 	TableFunction function("glue_alter_table", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
-	                       GlueAlterTableBind, GluePartitionChangeInit);
+	                       GlueAlterTableBind, GlueAlterTableInit);
 	return function;
 }
 
