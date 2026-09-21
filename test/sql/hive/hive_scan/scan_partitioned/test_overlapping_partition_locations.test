@@ -44,7 +44,7 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.overlap_orders');
 2
 
 # 1 lists the table root, 1000 lists each partition
-foreach threshold 1 1000
+foreach threshold 1 5
 
 statement ok
 SET hive_partition_listing_threshold = {threshold};
@@ -75,7 +75,7 @@ RESET hive_partition_listing_threshold;
 statement ok
 COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain/f.parquet';
 
-foreach threshold 1 1000
+foreach threshold 1 10
 
 statement ok
 SET hive_partition_listing_threshold = {threshold};

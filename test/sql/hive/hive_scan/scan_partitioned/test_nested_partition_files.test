@@ -86,7 +86,7 @@ COPY (SELECT 99 AS id, 99.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/defa
 statement ok
 COPY (SELECT 98 AS id, 98.0 AS amount) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/nested_orders/dt=2016-05-15/.hive-staging/data.parquet';
 
-foreach threshold 1 1000
+foreach threshold 1 10
 
 statement ok
 SET hive_partition_listing_threshold = {threshold};
