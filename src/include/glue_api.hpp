@@ -59,6 +59,14 @@ struct GlueTableInfo {
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;
 	vector<GlueColumn> partition_keys;
+	//! StorageDescriptor.BucketColumns: the columns the table's files are bucketed (clustered) on. Hive and Spark
+	//! place a row in a file by hashing these, and readers that know it prune buckets and skip shuffles. DuckDB has
+	//! no bucketing concept and cannot produce that layout, so this is read to refuse writes, never to create one.
+	vector<string> bucket_columns;
+	//! StorageDescriptor.NumberOfBuckets, -1 (or 0) when the table is not bucketed
+	int32_t number_of_buckets = -1;
+	//! StorageDescriptor.SortColumns: the sort order within each bucket, kept for the same reason
+	vector<string> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
@@ -80,6 +88,10 @@ public:
 	string GetParameter(const string &key) const;
 	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
 	string GetSerdeParameter(const string &key) const;
+	//! Whether the table's files are bucketed (clustered). DuckDB cannot write that layout, so writes are refused
+	bool IsBucketed() const;
+	//! Human readable description of the bucketing, for the refusal message
+	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
 	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say

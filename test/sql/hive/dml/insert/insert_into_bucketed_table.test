@@ -1,0 +1,132 @@
+# name: test/sql/hive/dml/insert/insert_into_bucketed_table.test
+# description: writes to a bucketed (clustered) Glue table are refused, reads are not
+# group: [insert]
+
+# Hive and Spark decide which file a row goes in by hashing the bucket columns, and an engine that knows a table
+# is bucketed relies on it -- it prunes buckets and skips the shuffle in a join. DuckDB has no bucketing concept
+# at all (no CLUSTERED BY, no bucket columns, nothing in CREATE TABLE) and no write path that could produce the
+# layout, so an INSERT here would add files that those engines then read incorrectly. The damage would surface in
+# their queries, not ours, which is why this has to be refused rather than best-effort. Athena refuses it too.
+#
+# 'default.fixture_bucketed' comes from scripts/docker-compose.yml rather than being created here: the extension
+# deliberately cannot create a bucketed table, so the only honest way to get one is out of band -- which is also
+# how they really arise, from Spark, Hive or Athena.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# ===========================================================================
+# the table is visible and describable
+# ===========================================================================
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND name = 'fixture_bucketed';
+----
+1
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucketed' ORDER BY column_index;
+----
+id	INTEGER
+amount	DOUBLE
+
+# ===========================================================================
+# reads are unaffected
+# ===========================================================================
+# Put data under the table's location without going through the catalog -- COPY TO writes S3 directly, so this is
+# not a catalog write and is not what the guard is about. It gives the read below something real to return.
+#
+# The table's location is fixture-fixed rather than {TEST_DIR}-scoped, so assertions here name specific ids
+# instead of counting everything: a run against a pre-fix binary leaves an extra file behind (that is the defect),
+# and an absolute count would then be unstable on the next run rather than reporting the thing under test.
+statement ok
+COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
+TO 's3://glue-test/warehouse/fixture/fixture_bucketed/data.parquet' (FORMAT parquet);
+
+query II
+SELECT id, amount FROM my_datalake.default.fixture_bucketed WHERE id IN (1, 2) ORDER BY id;
+----
+1	10.0
+2	20.0
+
+# ===========================================================================
+# INSERT is refused, and the message names the bucketing it read out of Glue
+# ===========================================================================
+# Asserting the description doubles as proof that BucketColumns / NumberOfBuckets were parsed at all -- before
+# this change nothing in the extension read them.
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
+----
+clustered by (id) into 4 buckets
+
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
+----
+DuckDB cannot write a bucketed layout
+
+# nothing was written -- the refused row is absent. This is the assertion that matters: the error message alone
+# would not prove the INSERT did not land, and on the pre-fix binary it does land.
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 3;
+----
+0
+
+# the INSERT ... SELECT form is the same write path, and is refused the same way
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed SELECT 4, 40.0;
+----
+DuckDB cannot write a bucketed layout
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 4;
+----
+0
+
+# CREATE TABLE IF NOT EXISTS ... AS SELECT on the existing bucketed table writes nothing, so it needs no guard of
+# its own: nothing is created and the insert is discarded. Asserted rather than assumed, because the guard lives in
+# GetHiveTableForDML and the CTAS path does not go through it -- if that ever changed, this is what would catch it.
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.fixture_bucketed AS SELECT 9 AS id, 90.0 AS amount;
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 9;
+----
+0
+
+# and the table is still bucketed afterwards, i.e. nothing rewrote its definition
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (5, 50.0);
+----
+clustered by (id) into 4 buckets
+
+# ===========================================================================
+# an ordinary table in the same database is unaffected
+# ===========================================================================
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.unbucketed_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.unbucketed_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO my_datalake.default.unbucketed_orders VALUES (1, 10.0);
+
+query I
+SELECT count(*) FROM my_datalake.default.unbucketed_orders;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.unbucketed_orders;

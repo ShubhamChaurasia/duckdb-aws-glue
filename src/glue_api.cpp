@@ -111,6 +111,23 @@ string GlueTableInfo::GetSerdeParameter(const string &key) const {
 	return string();
 }
 
+bool GlueTableInfo::IsBucketed() const {
+	// Glue writes NumberOfBuckets -1 (and Hive 0) for an unbucketed table, but the column list is what decides:
+	// a table with bucket columns is bucketed however the count is spelled.
+	return !bucket_columns.empty();
+}
+
+string GlueTableInfo::DescribeBucketing() const {
+	auto result = StringUtil::Format("clustered by (%s)", StringUtil::Join(bucket_columns, ", "));
+	if (number_of_buckets > 0) {
+		result += StringUtil::Format(" into %d buckets", number_of_buckets);
+	}
+	if (!sort_columns.empty()) {
+		result += StringUtil::Format(", sorted by (%s)", StringUtil::Join(sort_columns, ", "));
+	}
+	return result;
+}
+
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	auto serde = StringUtil::Lower(serde_library);
 	if (StringUtil::Contains(serde, "parquet")) {
@@ -290,6 +307,15 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
 	result.partition_keys = ToColumns(table.GetPartitionKeys());
+	// Bucketing: read so that writes can be refused. DuckDB cannot produce a bucketed layout, and writing
+	// unbucketed files into a bucketed table breaks the readers that trust it, so this must not be ignored.
+	for (auto &column : storage_descriptor.GetBucketColumns()) {
+		result.bucket_columns.push_back(ToStdString(column));
+	}
+	result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
+	for (auto &column : storage_descriptor.GetSortColumns()) {
+		result.sort_columns.push_back(ToStdString(column.GetColumn()));
+	}
 	result.parameters = ToStdMap(table.GetParameters());
 	return result;
 }
