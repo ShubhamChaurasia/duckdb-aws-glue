@@ -117,13 +117,28 @@ bool GlueTableInfo::IsBucketed() const {
 	return !bucket_columns.empty();
 }
 
+string GlueSortColumn::DescribeOrder() const {
+	switch (sort_order) {
+	case 1:
+		return "ASC";
+	case 0:
+		return "DESC";
+	default:
+		return StringUtil::Format("order %d", sort_order);
+	}
+}
+
 string GlueTableInfo::DescribeBucketing() const {
 	auto result = StringUtil::Format("clustered by (%s)", StringUtil::Join(bucket_columns, ", "));
 	if (number_of_buckets > 0) {
 		result += StringUtil::Format(" into %d buckets", number_of_buckets);
 	}
 	if (!sort_columns.empty()) {
-		result += StringUtil::Format(", sorted by (%s)", StringUtil::Join(sort_columns, ", "));
+		vector<string> sorted;
+		for (auto &sort_column : sort_columns) {
+			sorted.push_back(sort_column.column + " " + sort_column.DescribeOrder());
+		}
+		result += StringUtil::Format(", sorted by (%s)", StringUtil::Join(sorted, ", "));
 	}
 	return result;
 }
@@ -312,9 +327,17 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	for (auto &column : storage_descriptor.GetBucketColumns()) {
 		result.bucket_columns.push_back(ToStdString(column));
 	}
-	result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
+	// Only when Glue actually recorded it: the SDK's field defaults to 0, which would report a table Glue says
+	// nothing about identically to one Glue explicitly calls 0-bucketed (Hive's spelling). Left at -1 otherwise,
+	// which is the value Glue itself writes for an unbucketed table.
+	if (storage_descriptor.NumberOfBucketsHasBeenSet()) {
+		result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
+	}
 	for (auto &column : storage_descriptor.GetSortColumns()) {
-		result.sort_columns.push_back(ToStdString(column.GetColumn()));
+		GlueSortColumn sort_column;
+		sort_column.column = ToStdString(column.GetColumn());
+		sort_column.sort_order = column.GetSortOrder();
+		result.sort_columns.push_back(std::move(sort_column));
 	}
 	result.parameters = ToStdMap(table.GetParameters());
 	return result;

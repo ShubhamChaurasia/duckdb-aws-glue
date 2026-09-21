@@ -76,6 +76,12 @@ INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
 ----
 DuckDB cannot write a bucketed layout
 
+# the sort column, with its direction: SortOrder 1 is ascending
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
+----
+sorted by (id ASC)
+
 # nothing was written -- the refused row is absent. This is the assertion that matters: the error message alone
 # would not prove the INSERT did not land, and on the pre-fix binary it does land.
 query I

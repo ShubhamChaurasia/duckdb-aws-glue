@@ -29,6 +29,17 @@ struct GlueColumn {
 	string comment;
 };
 
+//! An entry of StorageDescriptor.SortColumns: a column the data within each bucket is sorted on
+struct GlueSortColumn {
+	string column;
+	//! Glue's SortOrder as stored: 1 ascending, 0 descending. Kept as the number rather than a direction so an
+	//! unexpected value is reported rather than guessed at
+	int32_t sort_order = 1;
+
+	//! 'ASC' for 1, 'DESC' for 0, 'order <n>' for anything else
+	string DescribeOrder() const;
+};
+
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
 	string name;
@@ -63,10 +74,14 @@ struct GlueTableInfo {
 	//! place a row in a file by hashing these, and readers that know it prune buckets and skip shuffles. DuckDB has
 	//! no bucketing concept and cannot produce that layout, so this is read to refuse writes, never to create one.
 	vector<string> bucket_columns;
-	//! StorageDescriptor.NumberOfBuckets, -1 (or 0) when the table is not bucketed
+	//! StorageDescriptor.NumberOfBuckets as Glue recorded it: -1 when Glue did not record one at all (which is also
+	//! the value Glue writes for an unbucketed table), 0 for Hive's unbucketed spelling. Neither implies the table
+	//! is unbucketed on its own - bucket_columns decides that, see IsBucketed()
 	int32_t number_of_buckets = -1;
-	//! StorageDescriptor.SortColumns: the sort order within each bucket, kept for the same reason
-	vector<string> sort_columns;
+	//! StorageDescriptor.SortColumns: how the rows within each bucket are ordered. Read for the same reason, and
+	//! with the direction: a sort-merge-bucket join in another engine needs it, so dropping it loses information
+	//! the catalog holds
+	vector<GlueSortColumn> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
