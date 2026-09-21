@@ -82,11 +82,10 @@ private:
 	void PlanListings() const;
 	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
 	void ListPartition(FileSystem &fs, idx_t partition_index) const;
-	//! Index every registered partition location, not only the ones being read: a file belongs to the deepest
-	//! location registered for it, and which partitions a query happens to read must not change that (once)
+	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
-	//! The partition a listed file belongs to: the deepest registered location the file lies under, walking up from
-	//! its directory and stopping below 'min_directory_size'. Invalid when the file is under no registered location.
+	//! The partition of the deepest registered location containing the file, searching no shorter than
+	//! 'min_directory_size'
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
 	//! Add a listed file of the partition unless this list already has it (two partitions sharing a location: the
 	//! file belongs to the first). Called with HiveScanInfo::file_partitions_lock held.
@@ -104,8 +103,7 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Every registered partition location (trailing '/' trimmed) to its index in HiveScanInfo::partitions, for
-	//! deepest-match attribution. Built by BuildPartitionLocations on first use.
+	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::partitions
 	mutable unordered_map<string, idx_t> partition_by_location;
 	mutable bool partition_locations_built = false;
 };

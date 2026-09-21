@@ -65,32 +65,17 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a path component below the table root is data (Hive skips _* and .* files and directories)
-static bool IsHiddenComponent(const string &name) {
-	return name.empty() || name[0] == '_' || name[0] == '.';
+//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
+static bool IsHiddenPath(const string &relative_path) {
+	for (auto &component : StringUtil::Split(relative_path, '/')) {
+		if (component.empty() || component[0] == '_' || component[0] == '.') {
+			return true;
+		}
+	}
+	return false;
 }
 
-//! The data files below 'location', at any depth.
-//!
-//! A location is a prefix, not a single directory level: DuckDB's own read_parquet descends into
-//! subdirectories when it is given a directory, and Glue stores nothing but the prefix, so a file in a
-//! nested directory under a partition belongs to that partition. Listing only one level made the answer
-//! depend on hive_partition_listing_threshold, because ListRoot below is recursive.
-//!
-//! Recursing means subdirectories a single level listing never saw are now in scope, so the hidden test
-//! applies to every component below 'location' rather than only the file name: a file in _temporary/ or
-//! .hive-staging/ is no more data than a _SUCCESS file is.
-//!
-//! This serves both the per-partition listing and the whole table location of an UNPARTITIONED table,
-//! so unpartitioned tables read nested files as well. That is deliberate: it is what read_parquet does
-//! with a directory, and it keeps all three listing paths (unpartitioned root, partitioned root,
-//! per-partition) on one rule.
-//!
-//! Not unified with ListRoot: that one maps each file to the DEEPEST registered partition location it
-//! lies under, while this attributes everything below 'location' to the one partition being listed. The
-//! two agree unless one partition's location is nested inside another's, in which case a file in the
-//! inner location is labelled with the outer partition's values here and the inner partition's values
-//! there.
+//! The data files below 'location', at any depth (like read_parquet on a directory)
 static void ListDataFiles(FileSystem &fs, const string &location, vector<OpenFileInfo> &files) {
 	auto directory = location;
 	StringUtil::RTrim(directory, "/");
@@ -99,17 +84,7 @@ static void ListDataFiles(FileSystem &fs, const string &location, vector<OpenFil
 	}
 	auto prefix = directory + "/";
 	for (auto &file : fs.GlobFiles(directory + "/**", FileGlobOptions::ALLOW_EMPTY)) {
-		if (!StringUtil::StartsWith(file.path, prefix)) {
-			continue;
-		}
-		bool hidden = false;
-		for (auto &component : StringUtil::Split(file.path.substr(prefix.size()), '/')) {
-			if (IsHiddenComponent(component)) {
-				hidden = true;
-				break;
-			}
-		}
-		if (hidden) {
+		if (!StringUtil::StartsWith(file.path, prefix) || IsHiddenPath(file.path.substr(prefix.size()))) {
 			continue;
 		}
 		files.push_back(file);
@@ -170,16 +145,13 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 		return;
 	}
 	partition_locations_built = true;
-	// Every registered partition, not only the ones this query reads. A file under a partition location belongs to
-	// that partition whether or not the partition survived pruning: leaving a pruned partition out would hand its
-	// files to the enclosing partition, so the values a row carries would depend on the query's filters.
 	for (idx_t i = 0; i < scan_info->partitions.size(); i++) {
 		auto location = scan_info->partitions[i].location;
 		StringUtil::RTrim(location, "/");
 		if (location.empty()) {
 			continue;
 		}
-		// Two partitions on the same location: the first wins, as in AddFile
+		// two partitions on the same location: the first wins, as in AddFile
 		partition_by_location.emplace(std::move(location), i);
 	}
 }
@@ -219,9 +191,7 @@ void HiveMultiFileList::ListPartition(FileSystem &fs, idx_t partition_index) con
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
-		// Locations may overlap: Glue lets a partition sit inside another partition's prefix, and the recursive
-		// listing here then also finds the inner partition's files. They are not this partition's, so attribute by
-		// deepest registered location, exactly as ListRoot does, and keep only what belongs here.
+		// skip files of another partition registered at a location nested inside this one
 		auto owner = OwningPartition(file.path, location.size());
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
@@ -248,6 +218,7 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 	}
 	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request
 	auto files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+	unordered_set<idx_t> reading;
 	for (auto partition_index : partitions) {
 		auto &partition = scan_info->partitions[partition_index];
 		if (partition.values.size() != scan_info->partition_keys.size()) {
@@ -256,38 +227,17 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 			                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
 			                            partition.values.size(), scan_info->partition_keys.size());
 		}
-	}
-	// Attribution is over EVERY registered location, while only the partitions of this job are read. Matching
-	// against the read set alone would give a pruned partition's files to the partition enclosing it, so a row's
-	// partition values would change with the query's filters.
-	BuildPartitionLocations();
-	unordered_set<idx_t> reading;
-	for (auto partition_index : partitions) {
 		reading.insert(partition_index);
 	}
+	BuildPartitionLocations();
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!StringUtil::StartsWith(file.path, root_prefix)) {
+		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
 			continue;
 		}
-		// hidden files and directories (_SUCCESS, .hive-staging, ...) are not data
-		auto relative = file.path.substr(root_prefix.size());
-		bool hidden = false;
-		for (auto &component : StringUtil::Split(relative, '/')) {
-			if (IsHiddenComponent(component)) {
-				hidden = true;
-				break;
-			}
-		}
-		if (hidden) {
-			continue;
-		}
-		// the deepest registered partition location the file lies in
 		auto partition_index = OwningPartition(file.path, root.size() + 1);
 		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
-			// under no registered location, or under one this job is not reading (pruned, or listed on its own
-			// because it lies outside the root)
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
