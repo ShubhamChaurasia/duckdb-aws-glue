@@ -2,21 +2,7 @@
 # description: glue_alter_table with more actions than one DataChunk holds: every action is applied and reported
 # group: [alter_partition]
 
-# glue_alter_table returns one row per action, so an ALTER TABLE registering more partitions than
-# STANDARD_VECTOR_SIZE (2048) has to span several output chunks. The scan must page its output rather than
-# writing every row into one chunk.
-#
-# Each case asserts the PAIR: the statement succeeds with the expected row count, AND Glue ends up holding
-# exactly the expected partitions. The pair is the point. A count on its own does not distinguish "applied
-# and reported" from "applied, then the statement failed on the way out" -- and the latter is the real
-# hazard here, because glue_alter_table pre-checks every action against Glue specifically so that a
-# statement which fails registers nothing. A failure after the writes defeats that.
-#
-# Actions are generated with list_transform over range() rather than written out, which folds to a constant
-# at bind time (glue_alter_table reads the list in its bind). Note 'lambda i:' -- 'i -> ' is rejected.
-#
-# if_not_exists is true throughout so the pre-check loop skips its per-action GetPartition call; without it
-# the test costs one extra Glue round-trip per partition and little more coverage.
+# if_not_exists skips the per-action GetPartition pre-check, saving a Glue call per partition
 
 require httpfs
 
@@ -31,9 +17,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-# ===========================================================================
-# exactly one chunk: 2048 actions. The control -- this passes even unpaged.
-# ===========================================================================
+# exactly one chunk
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.many_2048;
 
@@ -54,9 +38,7 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.many_2048');
 ----
 2048
 
-# ===========================================================================
-# one more than a chunk: 2049 actions, so the output spans two chunks
-# ===========================================================================
+# one more than a chunk
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.many_2049;
 
@@ -72,8 +54,7 @@ SELECT count(*) FROM glue_alter_table('my_datalake.default.many_2049',
 ----
 2049
 
-# every action is reported, once, and as an add -- a paging bug can preserve the
-# count while duplicating or dropping rows, so check distinctness too
+# every action is reported exactly once
 query III
 SELECT count(*), count(DISTINCT partition), count(DISTINCT action)
 FROM glue_alter_table('my_datalake.default.many_2049',
@@ -84,7 +65,6 @@ FROM glue_alter_table('my_datalake.default.many_2049',
 ----
 2049	2049	1
 
-# and Glue holds exactly those partitions
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.many_2049');
 ----
@@ -95,10 +75,7 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.many_2049') WHERE dt I
 ----
 3
 
-# ===========================================================================
-# several chunks: 4097 actions, which forces a third page and would catch an
-# off-by-one in the paging that a single boundary case can miss
-# ===========================================================================
+# three chunks
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.many_4097;
 
