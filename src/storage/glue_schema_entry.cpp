@@ -8,6 +8,7 @@
 #include <algorithm>
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
+#include "duckdb/common/enums/catalog_type.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/expression_binder/table_function_binder.hpp"
@@ -407,6 +408,12 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		}
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
+	}
+	// A VIEW_ENTRY lookup resolves to the GlueTable, so without this DROP VIEW on a table would delete it.
+	// Exception wording matches the one in duck_schema_entry.cpp.
+	if (existing->type != info.type) {
+		throw CatalogException("Existing object %s is of type %s, trying to drop type %s", table_name,
+		                       CatalogTypeToString(existing->type), CatalogTypeToString(info.type));
 	}
 	GlueAPI::DeleteTable(context, glue_catalog, database_info.name, table_name);
 	tables.RemoveEntry(table_name);

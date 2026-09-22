@@ -155,6 +155,12 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 	if (partitions) {
 		ParsePartitions(*scan_info, *partitions);
 	}
+	if (partition_keys && !partitions) {
+		throw BinderException("hive_scan: 'partition_keys' was given without 'partitions', which would read no rows. "
+		                      "Pass the partitions to read, e.g. partitions := [{%s: '...'}]; pass partitions := [] "
+		                      "for a table that has no registered partition",
+		                      scan_info->partition_keys.empty() ? "dt" : scan_info->partition_keys[0]);
+	}
 	for (auto &key : scan_info->partition_keys) {
 		bool found = false;
 		for (auto &column : scan_info->names) {
