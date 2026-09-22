@@ -471,34 +471,42 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 //===--------------------------------------------------------------------===//
 // Partition pruning
 //===--------------------------------------------------------------------===//
+struct PartitionKeyProjection {
+	idx_t projected_column_index;
+	idx_t partition_key_index;
+};
+
 //! Replace references to partition columns of the scanned table by the partition's values
 static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
-                                       const unordered_map<idx_t, idx_t> &projection_to_key, const HiveScanInfo &info,
+                                       const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
                                        const GluePartitionInfo &partition) {
 	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &colref = expr->Cast<BoundColumnRefExpression>();
 		if (colref.Binding().table_index != table_index) {
 			return;
 		}
-		auto entry = projection_to_key.find(colref.Binding().column_index.GetIndex());
-		if (entry == projection_to_key.end()) {
+		auto column_index = colref.Binding().column_index.GetIndex();
+		for (auto &projection : projections) {
+			if (projection.projected_column_index != column_index) {
+				continue;
+			}
+			auto &key = info.partition_keys[projection.partition_key_index];
+			auto &partition_value = partition.values[projection.partition_key_index];
+			auto value = HivePartitioning::GetValue(context, key, partition_value, colref.GetReturnType());
+			expr = make_uniq<BoundConstantExpression>(std::move(value));
 			return;
 		}
-		auto &key = info.partition_keys[entry->second];
-		auto value = HivePartitioning::GetValue(context, key, partition.values[entry->second], colref.GetReturnType());
-		expr = make_uniq<BoundConstantExpression>(std::move(value));
 		return;
 	}
 	ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) {
-		ReplacePartitionColumnRefs(context, child, table_index, projection_to_key, info, partition);
+		ReplacePartitionColumnRefs(context, child, table_index, projections, info, partition);
 	});
 }
 
 //! The partitions among 'candidates' that no filter rules out, each filter evaluated with the partition's values in
-//! place of its partition columns ('projection_to_key': projected position -> key). A filter that needs data columns is
-//! skipped.
+//! place of its partition columns. A filter that needs data columns is skipped.
 static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo &info, const vector<idx_t> &candidates,
-                                      TableIndex table_index, const unordered_map<idx_t, idx_t> &projection_to_key,
+                                      TableIndex table_index, const vector<PartitionKeyProjection> &projections,
                                       const vector<unique_ptr<Expression>> &filters,
                                       unordered_set<idx_t> &pruning_filters) {
 	vector<idx_t> kept;
@@ -507,7 +515,7 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 		bool keep = true;
 		for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
 			auto filter_copy = filters[filter_index]->Copy();
-			ReplacePartitionColumnRefs(context, filter_copy, table_index, projection_to_key, info, partition);
+			ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
 			Value result;
 			if (!filter_copy->IsScalar() || !filter_copy->IsFoldable() ||
 			    !ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result)) {
@@ -527,20 +535,34 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 	return kept;
 }
 
-//! Which projected columns ('column_ids' into 'column_names') are partition keys: projected position -> key index
-static unordered_map<idx_t, idx_t> PartitionKeyProjections(const HiveScanInfo &info, const vector<column_t> &column_ids,
-                                                           const vector<Identifier> &column_names) {
-	unordered_map<idx_t, idx_t> projection_to_key;
+//! Which projected columns ('column_ids' into 'column_names') are partition keys
+static vector<PartitionKeyProjection> PartitionKeyProjections(const HiveScanInfo &info,
+                                                              const vector<column_t> &column_ids,
+                                                              const vector<Identifier> &column_names) {
+	vector<PartitionKeyProjection> projections;
 	for (idx_t i = 0; i < column_ids.size(); i++) {
 		if (IsVirtualColumn(column_ids[i])) {
 			continue;
 		}
 		auto key_index = info.GetPartitionKeyIndex(column_names[column_ids[i]].GetIdentifierName());
 		if (key_index != DConstants::INVALID_INDEX) {
-			projection_to_key[i] = key_index;
+			projections.push_back({i, key_index});
 		}
 	}
-	return projection_to_key;
+	return projections;
+}
+
+static void AddPruningFiltersToExtraInfo(ExtraOperatorInfo &extra_info, const vector<unique_ptr<Expression>> &filters,
+                                         const unordered_set<idx_t> &pruning_filters) {
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		if (pruning_filters.find(filter_index) == pruning_filters.end()) {
+			continue;
+		}
+		if (!extra_info.file_filters.empty()) {
+			extra_info.file_filters += " AND ";
+		}
+		extra_info.file_filters += filters[filter_index]->ToString();
+	}
 }
 
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
@@ -551,8 +573,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	if (info.partition_keys.empty() || filters.empty()) {
 		return nullptr;
 	}
-	auto projection_to_key = PartitionKeyProjections(info, pushdown_info.column_ids, pushdown_info.column_names);
-	if (projection_to_key.empty()) {
+	auto projections = PartitionKeyProjections(info, pushdown_info.column_ids, pushdown_info.column_names);
+	if (projections.empty()) {
 		return nullptr;
 	}
 	// A filter that can be evaluated with the partition values alone decides whether the partition is read at all,
@@ -561,17 +583,9 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	auto &hive_list = files.Cast<HiveMultiFileList>();
 	auto &candidates = hive_list.PartitionIndexes();
 	unordered_set<idx_t> pruning_filters;
-	auto kept = PartitionsToRead(context, info, candidates, pushdown_info.table_index, projection_to_key, filters,
-	                             pruning_filters);
-	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-		if (pruning_filters.find(filter_index) == pruning_filters.end()) {
-			continue;
-		}
-		if (!pushdown_info.extra_info.file_filters.empty()) {
-			pushdown_info.extra_info.file_filters += " AND ";
-		}
-		pushdown_info.extra_info.file_filters += filters[filter_index]->ToString();
-	}
+	auto kept =
+	    PartitionsToRead(context, info, candidates, pushdown_info.table_index, projections, filters, pruning_filters);
+	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
 	pushdown_info.extra_info.total_files = candidates.size();
 	pushdown_info.extra_info.filtered_files = kept.size();
@@ -586,8 +600,8 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 	if (scan.partition_keys.empty() || !info.filters.HasFilters()) {
 		return nullptr;
 	}
-	auto projection_to_key = PartitionKeyProjections(scan, info.column_ids, info.column_names);
-	if (projection_to_key.empty()) {
+	auto projections = PartitionKeyProjections(scan, info.column_ids, info.column_names);
+	if (projections.empty()) {
 		return nullptr;
 	}
 	// The table filters become expressions over the scan's columns, as MultiFileList::DynamicFilterPushdown does
@@ -606,8 +620,8 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 		filters.push_back(filter.ToExpression(*column_ref));
 	}
 	unordered_set<idx_t> pruning_filters;
-	auto kept = PartitionsToRead(info.context, scan, partition_indexes, table_index, projection_to_key, filters,
-	                             pruning_filters);
+	auto kept =
+	    PartitionsToRead(info.context, scan, partition_indexes, table_index, projections, filters, pruning_filters);
 	if (kept.size() == partition_indexes.size()) {
 		return nullptr;
 	}
