@@ -66,17 +66,26 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! The data files directly below 'location'. Files whose name starts with '_' or '.' (_SUCCESS, .crc, ...) are not
-//! data, as in Hive.
+//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
+static bool IsHiddenPath(const string &relative_path) {
+	for (auto &component : StringUtil::Split(relative_path, '/')) {
+		if (component.empty() || component[0] == '_' || component[0] == '.') {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! The data files below 'location', at any depth (like read_parquet on a directory)
 static void ListDataFiles(FileSystem &fs, const string &location, vector<OpenFileInfo> &files) {
 	auto directory = location;
 	StringUtil::RTrim(directory, "/");
 	if (directory.empty()) {
 		return;
 	}
-	for (auto &file : fs.GlobFiles(directory + "/*", FileGlobOptions::ALLOW_EMPTY)) {
-		auto name = file.path.substr(file.path.find_last_of('/') + 1);
-		if (name.empty() || name[0] == '_' || name[0] == '.') {
+	auto prefix = directory + "/";
+	for (auto &file : fs.GlobFiles(directory + "/**", FileGlobOptions::ALLOW_EMPTY)) {
+		if (!StringUtil::StartsWith(file.path, prefix) || IsHiddenPath(file.path.substr(prefix.size()))) {
 			continue;
 		}
 		files.push_back(file);
@@ -90,11 +99,6 @@ HiveMultiFileList::HiveMultiFileList(ClientContext &context, shared_ptr<HiveScan
                                      vector<idx_t> partition_indexes_p)
     : LazyMultiFileList(&context), client_context(context), scan_info(std::move(scan_info_p)),
       partition_indexes(std::move(partition_indexes_p)) {
-}
-
-//! Whether a path component below the table root is data (Hive skips _* and .* files and directories)
-static bool IsHiddenComponent(const string &name) {
-	return name.empty() || name[0] == '_' || name[0] == '.';
 }
 
 void HiveMultiFileList::PlanListings() const {
@@ -137,6 +141,42 @@ void HiveMultiFileList::PlanListings() const {
 	}
 }
 
+void HiveMultiFileList::BuildPartitionLocations() const {
+	if (partition_locations_built) {
+		return;
+	}
+	partition_locations_built = true;
+	for (idx_t i = 0; i < scan_info->partitions.size(); i++) {
+		auto location = scan_info->partitions[i].location;
+		StringUtil::RTrim(location, "/");
+		if (location.empty()) {
+			continue;
+		}
+		// two partitions on the same location: the first wins, as in AddFile
+		partition_by_location.emplace(std::move(location), i);
+	}
+}
+
+optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
+	auto separator = file_path.find_last_of('/');
+	if (separator == string::npos) {
+		return optional_idx();
+	}
+	auto directory = file_path.substr(0, separator);
+	while (directory.size() >= min_directory_size) {
+		auto entry = partition_by_location.find(directory);
+		if (entry != partition_by_location.end()) {
+			return optional_idx(entry->second);
+		}
+		auto parent = directory.find_last_of('/');
+		if (parent == string::npos) {
+			break;
+		}
+		directory = directory.substr(0, parent);
+	}
+	return optional_idx();
+}
+
 void HiveMultiFileList::ListPartition(FileSystem &fs, idx_t partition_index) const {
 	auto &partition = scan_info->partitions[partition_index];
 	if (partition.values.size() != scan_info->partition_keys.size()) {
@@ -145,10 +185,18 @@ void HiveMultiFileList::ListPartition(FileSystem &fs, idx_t partition_index) con
 		                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
 		                            partition.values.size(), scan_info->partition_keys.size());
 	}
+	auto location = partition.location;
+	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> partition_files;
 	ListDataFiles(fs, partition.location, partition_files);
+	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
+		// skip files of another partition registered at a location nested inside this one
+		auto owner = OwningPartition(file.path, location.size());
+		if (owner.IsValid() && owner.GetIndex() != partition_index) {
+			continue;
+		}
 		AddFile(std::move(file), partition_index);
 	}
 }
@@ -171,8 +219,7 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 	}
 	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request
 	auto files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
-	// the partitions by location (without trailing slash), to match the files against
-	unordered_map<string, idx_t> partition_by_location;
+	unordered_set<idx_t> reading;
 	for (auto partition_index : partitions) {
 		auto &partition = scan_info->partitions[partition_index];
 		if (partition.values.size() != scan_info->partition_keys.size()) {
@@ -181,45 +228,17 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 			                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
 			                            partition.values.size(), scan_info->partition_keys.size());
 		}
-		auto location = partition.location;
-		StringUtil::RTrim(location, "/");
-		partition_by_location.emplace(location, partition_index);
+		reading.insert(partition_index);
 	}
+	BuildPartitionLocations();
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!StringUtil::StartsWith(file.path, root_prefix)) {
+		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
 			continue;
 		}
-		// hidden files and directories (_SUCCESS, .hive-staging, ...) are not data
-		auto relative = file.path.substr(root_prefix.size());
-		bool hidden = false;
-		for (auto &component : StringUtil::Split(relative, '/')) {
-			if (IsHiddenComponent(component)) {
-				hidden = true;
-				break;
-			}
-		}
-		if (hidden) {
-			continue;
-		}
-		// the deepest registered partition directory the file lies in; files outside every partition read (in
-		// unregistered or pruned directories) are skipped
-		auto directory = file.path.substr(0, file.path.find_last_of('/'));
-		optional_idx partition_index;
-		while (directory.size() > root.size()) {
-			auto entry = partition_by_location.find(directory);
-			if (entry != partition_by_location.end()) {
-				partition_index = entry->second;
-				break;
-			}
-			auto parent = directory.find_last_of('/');
-			if (parent == string::npos) {
-				break;
-			}
-			directory = directory.substr(0, parent);
-		}
-		if (!partition_index.IsValid()) {
+		auto partition_index = OwningPartition(file.path, root.size() + 1);
+		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
