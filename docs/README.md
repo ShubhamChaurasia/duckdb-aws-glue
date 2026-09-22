@@ -26,9 +26,10 @@ Attach options:
 Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet` through a custom
 `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
-- The data files are those directly below the location of every partition Glue lists (`GetPartitions`), or below
-  the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>` layout.
-  Files named `_*` or `.*` are skipped. A table without data files (just created) scans as empty.
+- The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
+  below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
+  layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
+  a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns are applied to the partition values first,
   so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`), and
@@ -94,7 +95,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is
-  unpartitioned and the files directly below the root are read.
+  unpartitioned and all files below the root are read; `partition_keys` without `partitions` is an error, and
+  `partitions := []` with `partition_keys` reads no rows.
 - A root or partition without data files scans as zero rows.
 
 ## Partitions
