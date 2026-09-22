@@ -2,16 +2,6 @@
 # description: writes to a bucketed (clustered) Glue table are refused, reads are not
 # group: [insert]
 
-# Hive and Spark decide which file a row goes in by hashing the bucket columns, and an engine that knows a table
-# is bucketed relies on it -- it prunes buckets and skips the shuffle in a join. DuckDB has no bucketing concept
-# at all (no CLUSTERED BY, no bucket columns, nothing in CREATE TABLE) and no write path that could produce the
-# layout, so an INSERT here would add files that those engines then read incorrectly. The damage would surface in
-# their queries, not ours, which is why this has to be refused rather than best-effort. Athena refuses it too.
-#
-# 'default.fixture_bucketed' comes from scripts/docker-compose.yml rather than being created here: the extension
-# deliberately cannot create a bucketed table, so the only honest way to get one is out of band -- which is also
-# how they really arise, from Spark, Hive or Athena.
-
 require httpfs
 
 require parquet
@@ -74,7 +64,7 @@ clustered by (id) into 4 buckets
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
 ----
-DuckDB cannot write a bucketed layout
+write a bucketed layout
 
 # the sort column, with its direction: SortOrder 1 is ascending
 statement error
@@ -93,10 +83,25 @@ SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 3;
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed SELECT 4, 40.0;
 ----
-DuckDB cannot write a bucketed layout
+write a bucketed layout
 
 query I
 SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 4;
+----
+0
+
+# COPY <table> FROM is a third write form, and it is planned through PlanInsert, the guard's only caller. Nothing
+# else pins that, so a refactor that routed COPY elsewhere would silently unguard it.
+statement ok
+COPY (SELECT 6 AS id, 60.0 AS amount) TO '{TEST_DIR}/bucketed_src.parquet' (FORMAT parquet);
+
+statement error
+COPY my_datalake.default.fixture_bucketed FROM '{TEST_DIR}/bucketed_src.parquet' (FORMAT parquet);
+----
+write a bucketed layout
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 6;
 ----
 0
 
@@ -116,6 +121,28 @@ statement error
 INSERT INTO my_datalake.default.fixture_bucketed VALUES (5, 50.0);
 ----
 clustered by (id) into 4 buckets
+
+# ===========================================================================
+# a table Glue records with bucket columns but no bucket count and no sort
+# ===========================================================================
+# 'fixture_bucketed_multi' is bucketed on two columns, with NumberOfBuckets and SortColumns absent -- which is what
+# IsBucketed() keying off the column list rather than the count is for: the write is still refused.
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
+----
+write a bucketed layout
+
+# both columns are named, and the two optional clauses are omitted rather than rendered empty or as 'into 0 buckets'.
+# Anchoring on what follows the closing paren is what proves the absence.
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
+----
+<REGEX>:.*clustered by \(id, amount\), and DuckDB.*
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed_multi WHERE id = 1;
+----
+0
 
 # ===========================================================================
 # an ordinary table in the same database is unaffected

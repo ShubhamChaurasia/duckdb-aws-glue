@@ -191,14 +191,11 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 		                              "written",
 		                              statement, table.name.GetIdentifierName(), glue_table.table_info.GetFormatName());
 	}
-	// Hive and Spark place a row in a bucket by hashing the bucket columns, and engines that know a table is
-	// bucketed rely on it: they prune buckets and skip the shuffle in a join. DuckDB has no bucketing concept and
-	// cannot produce that layout, so writing here would add files that silently break those readers -- the damage
-	// would surface in their queries, not ours. Athena refuses the same statement. Reads are unaffected.
+	// Writing bucketed tables has different criteria depending on whether we conform to Hive or to Spark's
+	// method (use of hash values and file naming). Pending that decision, we block writes. Reads are supported.
 	if (glue_table.table_info.IsBucketed()) {
-		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB cannot "
-		                              "write a bucketed layout. Writing to it would produce files that engines "
-		                              "relying on the bucketing read incorrectly. Reading the table is unaffected",
+		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "
+		                              "write a bucketed layout.",
 		                              statement, table.name.GetIdentifierName(),
 		                              glue_table.table_info.DescribeBucketing());
 	}

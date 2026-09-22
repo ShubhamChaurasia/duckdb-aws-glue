@@ -70,17 +70,12 @@ struct GlueTableInfo {
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;
 	vector<GlueColumn> partition_keys;
-	//! StorageDescriptor.BucketColumns: the columns the table's files are bucketed (clustered) on. Hive and Spark
-	//! place a row in a file by hashing these, and readers that know it prune buckets and skip shuffles. DuckDB has
-	//! no bucketing concept and cannot produce that layout, so this is read to refuse writes, never to create one.
+	//! the columns the table's files are bucketed (clustered) on
 	vector<string> bucket_columns;
-	//! StorageDescriptor.NumberOfBuckets as Glue recorded it: -1 when Glue did not record one at all (which is also
-	//! the value Glue writes for an unbucketed table), 0 for Hive's unbucketed spelling. Neither implies the table
-	//! is unbucketed on its own - bucket_columns decides that, see IsBucketed()
+	//! -1 if unbucketed or Glue did not record it, 0 for Hive's unbucketed. Neither implies the table
+	//! is unbucketed on its own - see IsBucketed.
 	int32_t number_of_buckets = -1;
-	//! StorageDescriptor.SortColumns: how the rows within each bucket are ordered. Read for the same reason, and
-	//! with the direction: a sort-merge-bucket join in another engine needs it, so dropping it loses information
-	//! the catalog holds
+	//! how the rows within each bucket are ordered
 	vector<GlueSortColumn> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
