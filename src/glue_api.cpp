@@ -111,6 +111,37 @@ string GlueTableInfo::GetSerdeParameter(const string &key) const {
 	return string();
 }
 
+bool GlueTableInfo::IsBucketed() const {
+	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
+	return !bucket_columns.empty();
+}
+
+string GlueColumn::DescribeSortOrder() const {
+	switch (sort_order) {
+	case GlueSortOrder::ASCENDING:
+		return "ASC";
+	case GlueSortOrder::DESCENDING:
+		return "DESC";
+	default:
+		return string();
+	}
+}
+
+string GlueTableInfo::DescribeBucketing() const {
+	auto result = StringUtil::Format("clustered by (%s)", StringUtil::Join(bucket_columns, ", "));
+	if (number_of_buckets > 0) {
+		result += StringUtil::Format(" into %d buckets", number_of_buckets);
+	}
+	if (!sort_columns.empty()) {
+		vector<string> sorted;
+		for (auto &sort_column : sort_columns) {
+			sorted.push_back(sort_column.name + " " + sort_column.DescribeSortOrder());
+		}
+		result += StringUtil::Format(", sorted by (%s)", StringUtil::Join(sorted, ", "));
+	}
+	return result;
+}
+
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	auto serde = StringUtil::Lower(serde_library);
 	if (StringUtil::Contains(serde, "parquet")) {
@@ -290,6 +321,19 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
 	result.partition_keys = ToColumns(table.GetPartitionKeys());
+	for (auto &column : storage_descriptor.GetBucketColumns()) {
+		result.bucket_columns.push_back(ToStdString(column));
+	}
+	if (storage_descriptor.NumberOfBucketsHasBeenSet()) {
+		result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
+	}
+	for (auto &column : storage_descriptor.GetSortColumns()) {
+		GlueColumn sort_column;
+		sort_column.name = ToStdString(column.GetColumn());
+		// Glue's SortOrder is 1 for ascending, 0 for descending
+		sort_column.sort_order = column.GetSortOrder() == 0 ? GlueSortOrder::DESCENDING : GlueSortOrder::ASCENDING;
+		result.sort_columns.push_back(std::move(sort_column));
+	}
 	result.parameters = ToStdMap(table.GetParameters());
 	return result;
 }

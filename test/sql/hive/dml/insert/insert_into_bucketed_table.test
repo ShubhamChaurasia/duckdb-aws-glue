@@ -1,0 +1,98 @@
+# name: test/sql/hive/dml/insert/insert_into_bucketed_table.test
+# description: writes to a bucketed (clustered) Glue table are refused, reads are not
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucketed' ORDER BY column_index;
+----
+id	INTEGER
+amount	DOUBLE
+
+# the fixture location is shared between runs, so the queries below filter on specific ids
+statement ok
+COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
+TO '{DEFAULT_S3_LOCATION}/fixture/fixture_bucketed/data.parquet' (FORMAT parquet);
+
+query II
+SELECT id, amount FROM my_datalake.default.fixture_bucketed WHERE id IN (1, 2) ORDER BY id;
+----
+1	10.0
+2	20.0
+
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
+----
+<REGEX>:.*INSERT into Glue table 'fixture_bucketed' is not supported: the table is clustered by \(id\) into 4 buckets, sorted by \(id ASC\), and DuckDB does not write a bucketed layout.*
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 3;
+----
+0
+
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed SELECT 4, 40.0;
+----
+write a bucketed layout
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 4;
+----
+0
+
+# CTAS does not go through the bucketing check, but IF NOT EXISTS on an existing table writes nothing
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.fixture_bucketed AS SELECT 9 AS id, 90.0 AS amount;
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 9;
+----
+0
+
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed VALUES (5, 50.0);
+----
+clustered by (id) into 4 buckets
+
+# bucket columns without NumberOfBuckets or SortColumns
+statement error
+INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
+----
+<REGEX>:.*the table is clustered by \(id, amount\), and DuckDB does not write a bucketed layout.*
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_bucketed_multi WHERE id = 1;
+----
+0
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.unbucketed_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.unbucketed_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO my_datalake.default.unbucketed_orders VALUES (1, 10.0);
+
+query I
+SELECT count(*) FROM my_datalake.default.unbucketed_orders;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.unbucketed_orders;

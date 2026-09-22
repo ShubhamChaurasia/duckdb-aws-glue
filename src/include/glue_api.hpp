@@ -22,11 +22,19 @@ enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
 
 string GlueTableFormatToString(GlueTableFormat format);
 
+enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
+
 struct GlueColumn {
 	string name;
 	//! The Glue (Hive style) type string, e.g. 'int', 'decimal(10,2)', 'array<string>'
 	string type;
 	string comment;
+	//! Only set for entries of GlueTableInfo::sort_columns
+	GlueSortOrder sort_order = GlueSortOrder::UNSORTED;
+
+public:
+	//! 'ASC', 'DESC', or empty when unsorted
+	string DescribeSortOrder() const;
 };
 
 //! A Glue "Database", exposed as a DuckDB schema
@@ -59,6 +67,13 @@ struct GlueTableInfo {
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;
 	vector<GlueColumn> partition_keys;
+	//! StorageDescriptor.BucketColumns / NumberOfBuckets / SortColumns
+	vector<string> bucket_columns;
+	//! -1 if unbucketed or Glue did not record it, 0 for Hive's unbucketed. Neither implies the table
+	//! is unbucketed on its own - see IsBucketed.
+	int32_t number_of_buckets = -1;
+	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
+	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
@@ -80,6 +95,9 @@ public:
 	string GetParameter(const string &key) const;
 	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
 	string GetSerdeParameter(const string &key) const;
+	bool IsBucketed() const;
+	//! Hive-style description of the bucketing, used in error messages
+	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
 	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say
