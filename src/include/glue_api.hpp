@@ -29,14 +29,14 @@ struct GlueColumn {
 	string comment;
 };
 
-//! An entry of StorageDescriptor.SortColumns: a column the data within each bucket is sorted on
+//! An entry of StorageDescriptor.SortColumns
+enum class GlueSortOrder : uint8_t { ASCENDING, DESCENDING };
+
 struct GlueSortColumn {
 	string column;
-	//! Glue's SortOrder as stored: 1 ascending, 0 descending. Kept as the number rather than a direction so an
-	//! unexpected value is reported rather than guessed at
-	int32_t sort_order = 1;
+	GlueSortOrder sort_order = GlueSortOrder::ASCENDING;
 
-	//! 'ASC' for 1, 'DESC' for 0, 'order <n>' for anything else
+public:
 	string DescribeOrder() const;
 };
 
@@ -70,12 +70,11 @@ struct GlueTableInfo {
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;
 	vector<GlueColumn> partition_keys;
-	//! the columns the table's files are bucketed (clustered) on
+	//! StorageDescriptor.BucketColumns / NumberOfBuckets / SortColumns
 	vector<string> bucket_columns;
 	//! -1 if unbucketed or Glue did not record it, 0 for Hive's unbucketed. Neither implies the table
 	//! is unbucketed on its own - see IsBucketed.
 	int32_t number_of_buckets = -1;
-	//! how the rows within each bucket are ordered
 	vector<GlueSortColumn> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
@@ -98,9 +97,8 @@ public:
 	string GetParameter(const string &key) const;
 	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
 	string GetSerdeParameter(const string &key) const;
-	//! Whether the table's files are bucketed (clustered). DuckDB cannot write that layout, so writes are refused
 	bool IsBucketed() const;
-	//! Human readable description of the bucketing, for the refusal message
+	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;

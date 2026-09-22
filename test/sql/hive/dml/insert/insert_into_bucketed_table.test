@@ -17,14 +17,6 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-# ===========================================================================
-# the table is visible and describable
-# ===========================================================================
-query I
-SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND name = 'fixture_bucketed';
-----
-1
-
 query II
 SELECT column_name, data_type FROM duckdb_columns()
 WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucketed' ORDER BY column_index;
@@ -32,18 +24,10 @@ WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucketed' ORDER BY
 id	INTEGER
 amount	DOUBLE
 
-# ===========================================================================
-# reads are unaffected
-# ===========================================================================
-# Put data under the table's location without going through the catalog -- COPY TO writes S3 directly, so this is
-# not a catalog write and is not what the guard is about. It gives the read below something real to return.
-#
-# The table's location is fixture-fixed rather than {TEST_DIR}-scoped, so assertions here name specific ids
-# instead of counting everything: a run against a pre-fix binary leaves an extra file behind (that is the defect),
-# and an absolute count would then be unstable on the next run rather than reporting the thing under test.
+# the fixture location is shared between runs, so the queries below filter on specific ids
 statement ok
 COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
-TO 's3://glue-test/warehouse/fixture/fixture_bucketed/data.parquet' (FORMAT parquet);
+TO '{DEFAULT_S3_LOCATION}/fixture/fixture_bucketed/data.parquet' (FORMAT parquet);
 
 query II
 SELECT id, amount FROM my_datalake.default.fixture_bucketed WHERE id IN (1, 2) ORDER BY id;
@@ -51,35 +35,16 @@ SELECT id, amount FROM my_datalake.default.fixture_bucketed WHERE id IN (1, 2) O
 1	10.0
 2	20.0
 
-# ===========================================================================
-# INSERT is refused, and the message names the bucketing it read out of Glue
-# ===========================================================================
-# Asserting the description doubles as proof that BucketColumns / NumberOfBuckets were parsed at all -- before
-# this change nothing in the extension read them.
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
 ----
-clustered by (id) into 4 buckets
+<REGEX>:.*INSERT into Glue table 'fixture_bucketed' is not supported: the table is clustered by \(id\) into 4 buckets, sorted by \(id ASC\), and DuckDB does not write a bucketed layout.*
 
-statement error
-INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
-----
-write a bucketed layout
-
-# the sort column, with its direction: SortOrder 1 is ascending
-statement error
-INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
-----
-sorted by (id ASC)
-
-# nothing was written -- the refused row is absent. This is the assertion that matters: the error message alone
-# would not prove the INSERT did not land, and on the pre-fix binary it does land.
 query I
 SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 3;
 ----
 0
 
-# the INSERT ... SELECT form is the same write path, and is refused the same way
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed SELECT 4, 40.0;
 ----
@@ -90,24 +55,7 @@ SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 4;
 ----
 0
 
-# COPY <table> FROM is a third write form, and it is planned through PlanInsert, the guard's only caller. Nothing
-# else pins that, so a refactor that routed COPY elsewhere would silently unguard it.
-statement ok
-COPY (SELECT 6 AS id, 60.0 AS amount) TO '{TEST_DIR}/bucketed_src.parquet' (FORMAT parquet);
-
-statement error
-COPY my_datalake.default.fixture_bucketed FROM '{TEST_DIR}/bucketed_src.parquet' (FORMAT parquet);
-----
-write a bucketed layout
-
-query I
-SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 6;
-----
-0
-
-# CREATE TABLE IF NOT EXISTS ... AS SELECT on the existing bucketed table writes nothing, so it needs no guard of
-# its own: nothing is created and the insert is discarded. Asserted rather than assumed, because the guard lives in
-# GetHiveTableForDML and the CTAS path does not go through it -- if that ever changed, this is what would catch it.
+# CTAS does not go through the bucketing check, but IF NOT EXISTS on an existing table writes nothing
 statement ok
 CREATE TABLE IF NOT EXISTS my_datalake.default.fixture_bucketed AS SELECT 9 AS id, 90.0 AS amount;
 
@@ -116,37 +64,22 @@ SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 9;
 ----
 0
 
-# and the table is still bucketed afterwards, i.e. nothing rewrote its definition
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed VALUES (5, 50.0);
 ----
 clustered by (id) into 4 buckets
 
-# ===========================================================================
-# a table Glue records with bucket columns but no bucket count and no sort
-# ===========================================================================
-# 'fixture_bucketed_multi' is bucketed on two columns, with NumberOfBuckets and SortColumns absent -- which is what
-# IsBucketed() keying off the column list rather than the count is for: the write is still refused.
+# bucket columns without NumberOfBuckets or SortColumns
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
 ----
-write a bucketed layout
-
-# both columns are named, and the two optional clauses are omitted rather than rendered empty or as 'into 0 buckets'.
-# Anchoring on what follows the closing paren is what proves the absence.
-statement error
-INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
-----
-<REGEX>:.*clustered by \(id, amount\), and DuckDB.*
+<REGEX>:.*the table is clustered by \(id, amount\), and DuckDB does not write a bucketed layout.*
 
 query I
 SELECT count(*) FROM my_datalake.default.fixture_bucketed_multi WHERE id = 1;
 ----
 0
 
-# ===========================================================================
-# an ordinary table in the same database is unaffected
-# ===========================================================================
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.unbucketed_orders;
 

@@ -65,7 +65,8 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   touched, partition columns are not stored in the files) and register new partition directories in Glue with
   BatchCreatePartition. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
-  fails the (empty) table stays.
+  fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
+  they can be read.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable. Existing parquet files
   keep their types, so only widening type changes are allowed: integer widening (TINYINT to BIGINT), FLOAT to
@@ -176,7 +177,8 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
 
 - `test/configs/local_glue.json`: [moto](https://github.com/getmoto/moto) serving the Glue API and MinIO serving S3,
-  both from `scripts/docker-compose.yml`, which also creates the bucket and the Glue database `default`.
+  both from `scripts/docker-compose.yml`, which also creates the bucket, the Glue database `default` and the bucketed
+  tables `default.fixture_bucketed` and `default.fixture_bucketed_multi` (the extension can not create those).
 - `test/configs/cloud_glue.json`: a live AWS Glue Data Catalog, with credentials from the AWS credential chain.
 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,

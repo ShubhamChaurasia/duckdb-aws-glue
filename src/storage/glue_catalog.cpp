@@ -191,8 +191,7 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 		                              "written",
 		                              statement, table.name.GetIdentifierName(), glue_table.table_info.GetFormatName());
 	}
-	// Writing bucketed tables has different criteria depending on whether we conform to Hive or to Spark's
-	// method (use of hash values and file naming). Pending that decision, we block writes. Reads are supported.
+	// Hive and Spark bucket with different hash functions and file names; neither is implemented
 	if (glue_table.table_info.IsBucketed()) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "
 		                              "write a bucketed layout.",

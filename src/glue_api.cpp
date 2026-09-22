@@ -112,19 +112,12 @@ string GlueTableInfo::GetSerdeParameter(const string &key) const {
 }
 
 bool GlueTableInfo::IsBucketed() const {
-	// Glue writes NumberOfBuckets -1 (and Hive 0) for an unbucketed table, but bucket columns decide.
+	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
 	return !bucket_columns.empty();
 }
 
 string GlueSortColumn::DescribeOrder() const {
-	switch (sort_order) {
-	case 1:
-		return "ASC";
-	case 0:
-		return "DESC";
-	default:
-		return StringUtil::Format("order %d", sort_order);
-	}
+	return sort_order == GlueSortOrder::DESCENDING ? "DESC" : "ASC";
 }
 
 string GlueTableInfo::DescribeBucketing() const {
@@ -321,7 +314,6 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
 	result.partition_keys = ToColumns(table.GetPartitionKeys());
-	// read so that we can refuse writes to bucketed tables.
 	for (auto &column : storage_descriptor.GetBucketColumns()) {
 		result.bucket_columns.push_back(ToStdString(column));
 	}
@@ -331,7 +323,8 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	for (auto &column : storage_descriptor.GetSortColumns()) {
 		GlueSortColumn sort_column;
 		sort_column.column = ToStdString(column.GetColumn());
-		sort_column.sort_order = column.GetSortOrder();
+		// Glue's SortOrder is 1 for ascending, 0 for descending
+		sort_column.sort_order = column.GetSortOrder() == 0 ? GlueSortOrder::DESCENDING : GlueSortOrder::ASCENDING;
 		result.sort_columns.push_back(std::move(sort_column));
 	}
 	result.parameters = ToStdMap(table.GetParameters());
