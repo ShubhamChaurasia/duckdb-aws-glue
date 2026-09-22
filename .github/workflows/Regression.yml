@@ -140,6 +140,7 @@ jobs:
         run: |
           mkdir -p .github/regression
           ls benchmark/*.benchmark > .github/regression/hive_benchmarks.csv
+          ls benchmark/pushdown/*.benchmark >> .github/regression/hive_benchmarks.csv
           python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/hive_benchmarks.csv --verbose --threads 2
 
       - name: Server logs

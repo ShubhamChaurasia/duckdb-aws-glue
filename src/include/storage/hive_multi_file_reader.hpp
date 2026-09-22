@@ -64,6 +64,8 @@ public:
 		return partition_indexes;
 	}
 	FileExpandResult GetExpandResult() const override;
+	//! Prune on the table filters pushed in when the scan starts
+	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
