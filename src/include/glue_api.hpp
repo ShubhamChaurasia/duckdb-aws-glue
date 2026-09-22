@@ -22,22 +22,19 @@ enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
 
 string GlueTableFormatToString(GlueTableFormat format);
 
+enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
+
 struct GlueColumn {
 	string name;
 	//! The Glue (Hive style) type string, e.g. 'int', 'decimal(10,2)', 'array<string>'
 	string type;
 	string comment;
-};
-
-//! An entry of StorageDescriptor.SortColumns
-enum class GlueSortOrder : uint8_t { ASCENDING, DESCENDING };
-
-struct GlueSortColumn {
-	string column;
-	GlueSortOrder sort_order = GlueSortOrder::ASCENDING;
+	//! Only set for entries of GlueTableInfo::sort_columns
+	GlueSortOrder sort_order = GlueSortOrder::UNSORTED;
 
 public:
-	string DescribeOrder() const;
+	//! 'ASC', 'DESC', or empty when unsorted
+	string DescribeSortOrder() const;
 };
 
 //! A Glue "Database", exposed as a DuckDB schema
@@ -75,7 +72,8 @@ struct GlueTableInfo {
 	//! -1 if unbucketed or Glue did not record it, 0 for Hive's unbucketed. Neither implies the table
 	//! is unbucketed on its own - see IsBucketed.
 	int32_t number_of_buckets = -1;
-	vector<GlueSortColumn> sort_columns;
+	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
+	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;

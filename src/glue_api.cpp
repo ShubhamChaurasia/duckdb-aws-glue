@@ -116,8 +116,15 @@ bool GlueTableInfo::IsBucketed() const {
 	return !bucket_columns.empty();
 }
 
-string GlueSortColumn::DescribeOrder() const {
-	return sort_order == GlueSortOrder::DESCENDING ? "DESC" : "ASC";
+string GlueColumn::DescribeSortOrder() const {
+	switch (sort_order) {
+	case GlueSortOrder::ASCENDING:
+		return "ASC";
+	case GlueSortOrder::DESCENDING:
+		return "DESC";
+	default:
+		return string();
+	}
 }
 
 string GlueTableInfo::DescribeBucketing() const {
@@ -128,7 +135,7 @@ string GlueTableInfo::DescribeBucketing() const {
 	if (!sort_columns.empty()) {
 		vector<string> sorted;
 		for (auto &sort_column : sort_columns) {
-			sorted.push_back(sort_column.column + " " + sort_column.DescribeOrder());
+			sorted.push_back(sort_column.name + " " + sort_column.DescribeSortOrder());
 		}
 		result += StringUtil::Format(", sorted by (%s)", StringUtil::Join(sorted, ", "));
 	}
@@ -321,8 +328,8 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 		result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
 	}
 	for (auto &column : storage_descriptor.GetSortColumns()) {
-		GlueSortColumn sort_column;
-		sort_column.column = ToStdString(column.GetColumn());
+		GlueColumn sort_column;
+		sort_column.name = ToStdString(column.GetColumn());
 		// Glue's SortOrder is 1 for ascending, 0 for descending
 		sort_column.sort_order = column.GetSortOrder() == 0 ? GlueSortOrder::DESCENDING : GlueSortOrder::ASCENDING;
 		result.sort_columns.push_back(std::move(sort_column));
