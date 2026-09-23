@@ -1,0 +1,82 @@
+# name: test/sql/hive/ddl/views/test_foreign_view.test
+# description: views written by other engines (seeded by scripts/docker-compose.yml) are listed, not queried, replaced or dropped
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the seeded views are views, not tables, whatever engine wrote them
+query IIII
+SELECT view_name, is_bound, tags['duckdb_view'], comment FROM duckdb_views()
+WHERE database_name = 'my_datalake' AND view_name LIKE 'fixture_view_%' ORDER BY view_name;
+----
+fixture_view_lateral	false	NULL	NULL
+fixture_view_moved	false	true	NULL
+fixture_view_other	false	NULL	a view of another engine
+fixture_view_plain	false	NULL	NULL
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name LIKE 'fixture_view_%';
+----
+0
+
+# duckdb_columns() binds every view it lists; a view that refuses to bind is skipped, not an error
+statement ok
+SELECT * FROM duckdb_columns() WHERE database_name = 'my_datalake';
+
+# the stored text is shown as is
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'fixture_view_plain';
+----
+CREATE VIEW fixture_view_plain AS SELECT id, amount FROM "default".fixture_view_base WHERE id > 1;
+
+# only views written by DuckDB are queried, even when the text would parse
+statement error
+SELECT * FROM my_datalake.default.fixture_view_plain;
+----
+Glue view "default.fixture_view_plain" can not be queried: it was not written by DuckDB (no duckdb_view parameter)
+
+statement error
+SELECT * FROM my_datalake.default.fixture_view_lateral;
+----
+can not be queried: it was not written by DuckDB
+
+statement error
+DESCRIBE my_datalake.default.fixture_view_other;
+----
+can not be queried: it was not written by DuckDB
+
+statement error
+DROP VIEW my_datalake.default.fixture_view_plain;
+----
+Glue view "fixture_view_plain" was not written by DuckDB; drop it from the engine that wrote it
+
+query I
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'fixture_view_%';
+----
+4
+
+# A DuckDB view copied into another database than it was written for: its unqualified names would bind against the
+# wrong tables, so it is refused with the reason (it is ours, so unlike the views above it could be replaced or dropped)
+statement error
+SELECT * FROM my_datalake.default.fixture_view_moved;
+----
+Glue view "default.fixture_view_moved" can not be queried: it was written for database "elsewhere" and is now in database "default"
+
+query II
+SELECT tags['duckdb_view'], tags['duckdb_view_default_database'] FROM duckdb_views()
+WHERE database_name = 'my_datalake' AND view_name = 'fixture_view_moved';
+----
+true	elsewhere

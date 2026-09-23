@@ -16,7 +16,10 @@ namespace duckdb {
 GlueTableSet::GlueTableSet(GlueSchemaEntry &schema) : schema(schema), catalog(schema.catalog.Cast<GlueCatalog>()) {
 }
 
-unique_ptr<GlueTable> GlueTableSet::CreateTableEntry(const GlueTableInfo &table) {
+unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
+	if (table.IsView()) {
+		return GlueView::FromTableInfo(catalog, schema, table);
+	}
 	CreateTableInfo info(schema, Identifier(table.name));
 	for (auto &column : table.columns) {
 		info.columns.AddColumn(ColumnDefinition(Identifier(column.name), GlueTypes::ToLogicalType(column.type)));
@@ -45,9 +48,9 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 			// already loaded through a direct lookup
 			continue;
 		}
-		unique_ptr<GlueTable> entry;
+		unique_ptr<CatalogEntry> entry;
 		try {
-			entry = CreateTableEntry(table);
+			entry = CreateEntry(table);
 		} catch (std::exception &ex) {
 			// A table whose Glue definition we can not turn into a DuckDB table (e.g. an unsupported column type)
 			// must not break listing the other tables: leave it out and log why. Looking the table up by name
@@ -74,11 +77,14 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
 		return nullptr;
 	}
-	auto result = entries.emplace(table.name, CreateTableEntry(table));
+	auto result = entries.emplace(table.name, CreateEntry(table));
 	return result.first->second.get();
 }
 
 void GlueTableSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
+	// tables and views share the set and a scan of either type yields both, as in DuckDB's own schema: the catalog
+	// functions filter by entry type themselves, and duckdb_columns() collects the columns of views through a
+	// TABLE_ENTRY scan
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
 	for (auto &entry : entries) {
@@ -86,7 +92,7 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	}
 }
 
-optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<GlueTable> entry) {
+optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
 	auto name = entry->name.GetIdentifierName();
 	entries.erase(name);

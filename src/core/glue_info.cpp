@@ -188,6 +188,16 @@ GlueTableFormat GlueTableInfo::GetFormat() const {
 	return GlueTableFormat::UNKNOWN;
 }
 
+GlueTableType GlueTableTypeFromString(const string &type) {
+	if (StringUtil::CIEquals(type, "EXTERNAL_TABLE")) {
+		return GlueTableType::EXTERNAL_TABLE;
+	}
+	if (StringUtil::CIEquals(type, "VIRTUAL_VIEW")) {
+		return GlueTableType::VIRTUAL_VIEW;
+	}
+	return GlueTableType::OTHER;
+}
+
 string GlueTableInfo::GetFormatName() const {
 	auto format = GetFormat();
 	if (format == GlueTableFormat::HIVE) {
