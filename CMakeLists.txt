@@ -25,28 +25,11 @@ include_directories(src/include)
 include_directories(${CURL_INCLUDE_DIRS})
 include_directories(${AWSSDK_INCLUDE_DIRS})
 
-set(EXTENSION_SOURCES
-    src/glue_extension.cpp
-    src/glue_attach.cpp
-    src/glue_api.cpp
-    src/glue_types.cpp
-    src/glue_http_client.cpp
-    src/glue_functions.cpp
-    src/glue_partition_functions.cpp
-    src/glue_grammar.cpp
-    src/hive_scan_function.cpp
-    src/storage/glue_catalog.cpp
-    src/storage/glue_schema_set.cpp
-    src/storage/glue_schema_entry.cpp
-    src/storage/glue_table_set.cpp
-    src/storage/glue_table.cpp
-    src/storage/hive_multi_file_reader.cpp
-    src/storage/glue_hive_insert.cpp
-    src/storage/glue_transaction.cpp
-    src/storage/glue_transaction_manager.cpp)
+set(GLUE_EXTENSION_FILES)
+add_subdirectory(src)
 
-build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
-build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+build_static_extension(${TARGET_NAME} ${GLUE_EXTENSION_FILES})
+build_loadable_extension(${TARGET_NAME} " " ${GLUE_EXTENSION_FILES})
 
 # Link the AWS SDK, CURL and OpenSSL in both the static library and the loadable
 # extension
