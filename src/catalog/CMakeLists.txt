@@ -1,0 +1,14 @@
+add_library_unity(
+  glue_catalog
+  OBJECT
+  glue_attach.cpp
+  glue_catalog.cpp
+  glue_schema_entry.cpp
+  glue_schema_set.cpp
+  glue_table.cpp
+  glue_table_set.cpp
+  glue_transaction.cpp
+  glue_transaction_manager.cpp)
+set(GLUE_EXTENSION_FILES
+    ${GLUE_EXTENSION_FILES} $<TARGET_OBJECTS:glue_catalog>
+    PARENT_SCOPE)
