@@ -22,6 +22,7 @@ query IIII
 SELECT view_name, is_bound, tags['duckdb_view'], comment FROM duckdb_views()
 WHERE database_name = 'my_datalake' AND view_name LIKE 'fixture_view_%' ORDER BY view_name;
 ----
+fixture_view_keep	false	true	kept across CREATE OR REPLACE
 fixture_view_lateral	false	NULL	NULL
 fixture_view_moved	false	true	NULL
 fixture_view_other	false	NULL	a view of another engine
@@ -79,7 +80,7 @@ already exists
 query I
 SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'fixture_view_%';
 ----
-4
+5
 
 # A DuckDB view copied into another database than it was written for: its unqualified names would bind against the
 # wrong tables, so it is refused with the reason (it is ours, so unlike the views above it could be replaced or dropped)

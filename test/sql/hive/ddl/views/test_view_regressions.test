@@ -1,0 +1,122 @@
+# name: test/sql/hive/ddl/views/test_view_regressions.test
+# description: unqualified names in a Glue view resolve in the view's database, whatever the session's search path
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.vr_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vr_orders;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.vr_db2.vr_view2;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.vr_db2.vr_orders;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.vr_db2;
+
+statement ok
+CREATE TABLE my_datalake.default.vr_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO my_datalake.default.vr_orders VALUES (1, 10.0), (2, 20.0);
+
+statement ok
+CREATE VIEW my_datalake.default.vr_view AS SELECT id, amount FROM vr_orders WHERE id > 0;
+
+# a table of the same name in the session's default catalog must not capture the view's unqualified name
+statement ok
+CREATE TABLE vr_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO vr_orders VALUES (99, 99.0);
+
+statement ok
+USE memory;
+
+query II
+SELECT * FROM my_datalake.default.vr_view ORDER BY id;
+----
+1	10.0
+2	20.0
+
+# A second Glue database of the same catalog with a table of the same name: the view created in 'default' keeps reading
+# default.vr_orders while the session's current database is vr_db2, whether the view is named with its database or
+# found through the search path; a view created in vr_db2 over its own vr_orders reads that one
+statement ok
+CREATE SCHEMA my_datalake.vr_db2;
+
+statement ok
+CREATE TABLE my_datalake.vr_db2.vr_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+INSERT INTO my_datalake.vr_db2.vr_orders VALUES (7, 70.0);
+
+statement ok
+CREATE VIEW my_datalake.vr_db2.vr_view2 AS SELECT id, amount FROM vr_orders;
+
+statement ok
+USE my_datalake.vr_db2;
+
+query II
+SELECT * FROM my_datalake.default.vr_view ORDER BY id;
+----
+1	10.0
+2	20.0
+
+query II
+SELECT * FROM vr_view2;
+----
+7	70.0
+
+statement ok
+USE my_datalake.default;
+
+query II
+SELECT * FROM vr_view ORDER BY id;
+----
+1	10.0
+2	20.0
+
+query II
+SELECT * FROM my_datalake.vr_db2.vr_view2;
+----
+7	70.0
+
+statement ok
+USE memory;
+
+statement ok
+DROP VIEW my_datalake.vr_db2.vr_view2;
+
+statement ok
+DROP TABLE my_datalake.vr_db2.vr_orders;
+
+statement ok
+DROP SCHEMA my_datalake.vr_db2;
+
+statement ok
+DROP VIEW my_datalake.default.vr_view;
+
+statement ok
+DROP TABLE my_datalake.default.vr_orders;
+
+statement ok
+DROP TABLE vr_orders;
