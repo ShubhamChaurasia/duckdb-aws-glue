@@ -179,9 +179,10 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:
 
-- `test/configs/local_glue.json`: [moto](https://github.com/getmoto/moto) serving the Glue API and MinIO serving S3,
-  both from `scripts/docker-compose.yml`, which also creates the bucket, the Glue database `default` and the bucketed
-  tables `default.fixture_bucketed` and `default.fixture_bucketed_multi` (the extension can not create those).
+- `test/configs/local_glue.json`: [moto](https://github.com/getmoto/moto) serving the Glue API and
+  [SeaweedFS](https://github.com/seaweedfs/seaweedfs) serving S3, both from `scripts/docker-compose.yml`, which also
+  creates the bucket, the Glue database `default` and the bucketed tables `default.fixture_bucketed` and
+  `default.fixture_bucketed_multi` (the extension can not create those).
 - `test/configs/cloud_glue.json`: a live AWS Glue Data Catalog, with credentials from the AWS credential chain.
 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
@@ -205,7 +206,7 @@ each other; `make glue-fixture-down` throws the containers and their data away.
 
 The benchmarks under `benchmark/` read from the same local servers. They build their tables in the `load` step and
 use `debug_fs_delay_mean_ms` to add latency to every file open and read, standing in for the S3 round trip the local
-MinIO does not have (`make glue-fixture` first; the benchmark runner needs a build with `BUILD_BENCHMARK=1`):
+SeaweedFS does not have (`make glue-fixture` first; the benchmark runner needs a build with `BUILD_BENCHMARK=1`):
 
 ```sh
 AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benchmark/heavily_partitioned_table.benchmark
