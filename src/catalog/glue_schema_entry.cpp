@@ -18,6 +18,7 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "core/glue_types.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
@@ -222,7 +223,64 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateIndex(CatalogTransaction trans
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
-	throw NotImplementedException("Glue databases do not support creating views (yet)");
+	auto &context = transaction.GetContext();
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto view_name = info.GetQualifiedName().Name().GetIdentifierName();
+
+	EntryLookupInfo lookup(CatalogType::VIEW_ENTRY, QualifiedName(Identifier(view_name)));
+	auto existing = tables.GetEntry(context, lookup);
+	CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
+	if (existing) {
+		switch (info.on_conflict) {
+		case OnCreateConflict::IGNORE_ON_CONFLICT:
+			return existing;
+		case OnCreateConflict::ERROR_ON_CONFLICT:
+			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
+			                       database_info.name);
+		default:
+			if (!existing->Cast<GlueView>().IsDuckDBView()) {
+				throw CatalogException(
+				    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
+			}
+			break;
+		}
+	}
+
+	GlueViewInfo view;
+	view.database_name = database_info.name;
+	view.name = view_name;
+	view.sql = GlueView::RenderViewSql(info);
+	try {
+		// what is stored must read back: never write a view DuckDB itself could not parse
+		CreateViewInfo::ParseSelect(view.sql);
+	} catch (std::exception &ex) {
+		ErrorData error(ex);
+		throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
+		                        error.RawMessage(), view.sql);
+	}
+	view.secure = info.security_type == ViewSecurityType::SECURE_VIEW;
+	// the stored columns carry the column alias list of CREATE VIEW: an alias replaces the query's own name
+	for (idx_t i = 0; i < info.types.size(); i++) {
+		GlueColumn column;
+		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
+		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
+		column.type = GlueTypes::FromLogicalType(info.types[i]);
+		view.columns.push_back(std::move(column));
+	}
+	if (existing) {
+		GlueAPI::UpdateView(context, glue_catalog, view);
+	} else {
+		GlueAPI::CreateView(context, glue_catalog, view);
+	}
+
+	// re-fetch so the entry reflects what Glue stored
+	tables.RemoveEntry(view_name);
+	GlueTableInfo created;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, created)) {
+		throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
+		                       database_info.name, view_name);
+	}
+	return tables.CreateEntry(tables.CreateEntry(created));
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateSequence(CatalogTransaction transaction, CreateSequenceInfo &info) {

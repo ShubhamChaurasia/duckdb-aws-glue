@@ -39,6 +39,9 @@ public:
 	//! Create a standard (Hive style) Glue table storing parquet files at 'table.location', with the columns and
 	//! partition keys in 'table'
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
+	static void CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW)
+	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
 	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,

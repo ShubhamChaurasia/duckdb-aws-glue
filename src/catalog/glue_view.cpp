@@ -41,6 +41,10 @@ unique_ptr<CatalogEntry> GlueView::Copy(ClientContext &context) const {
 	return FromTableInfo(catalog, schema, table_info);
 }
 
+string GlueView::RenderViewSql(const CreateViewInfo &info) {
+	return info.query->ToString();
+}
+
 unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table) {
 	auto sql = table.view_original_text.empty() ? table.view_expanded_text : table.view_original_text;
 

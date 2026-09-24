@@ -23,6 +23,11 @@ public:
 
 	//! Build the view entry for a VIRTUAL_VIEW Glue table
 	static unique_ptr<GlueView> FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table);
+	//! The SELECT to store in Glue: the query as DuckDB prints it. Unqualified names in it belong to the view's
+	//! database, which the reader records next to it (duckdb_view_default_database) and DuckDB uses as the
+	//! search path when it binds a view; the column alias list is carried by the stored columns.
+	static string RenderViewSql(const CreateViewInfo &info);
+
 	//! Whether the view was written by DuckDB (parameter duckdb_view): the only views we replace or drop
 	bool IsDuckDBView() const {
 		return is_duckdb_view;

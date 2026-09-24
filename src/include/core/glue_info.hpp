@@ -113,6 +113,17 @@ public:
 	string GetEscapeCharacter() const;
 };
 
+//! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB
+struct GlueViewInfo {
+	string database_name;
+	string name;
+	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	string sql;
+	//! The bound output columns; empty for a view created with DEFER_BINDING
+	vector<GlueColumn> columns;
+	bool secure = false;
+};
+
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location
 struct GluePartitionInput {
 	vector<string> values;

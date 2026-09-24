@@ -1,8 +1,8 @@
 # Local Glue + S3 for the tests: moto serves the Glue API, SeaweedFS serves S3. The 'init' service creates the S3 bucket,
 # the Glue database 'default' the tests use, the bucketed tables 'fixture_bucketed' and 'fixture_bucketed_multi'
 # (the extension can not create bucketed tables) and the views 'fixture_view_*' written the way other engines write
-# them, plus one DuckDB view copied from another database (their SQL is never run, so the tables they name need not
-# exist), so `docker compose up -d` is all the setup there is.
+# them, a DuckDB view copied from another database and one carrying a description and a foreign parameter (their SQL is
+# never run, so the tables they name need not exist), so `docker compose up -d` is all the setup there is.
 #   docker compose -f scripts/docker-compose.yml up -d
 #   AWS_EC2_METADATA_DISABLED=true ./build/relassert/test/unittest --test-config test/configs/local_glue.json 'test/sql/*'
 # Ports 5555 and 9100 are used so that they do not clash with macOS (5000) and other S3 instances (9000).
@@ -46,5 +46,6 @@ services:
       aws --endpoint-url http://moto:5000 glue create-table --database-name default --table-input '{\"Name\": \"fixture_view_lateral\", \"TableType\": \"VIRTUAL_VIEW\", \"ViewOriginalText\": \"SELECT team, score FROM default.matches LATERAL VIEW explode(scores) m AS score\", \"ViewExpandedText\": \"SELECT team, score FROM default.matches LATERAL VIEW explode(scores) m AS score\", \"StorageDescriptor\": {\"Columns\": [{\"Name\": \"team\", \"Type\": \"string\"}, {\"Name\": \"score\", \"Type\": \"int\"}]}, \"Parameters\": {}}' 2>/dev/null || true;
       aws --endpoint-url http://moto:5000 glue create-table --database-name default --table-input '{\"Name\": \"fixture_view_other\", \"TableType\": \"VIRTUAL_VIEW\", \"ViewOriginalText\": \"/* view: eyJzcWwiOiAiU0VMRUNUIDEifQ== */\", \"ViewExpandedText\": \"/* view */\", \"StorageDescriptor\": {\"Columns\": [{\"Name\": \"x\", \"Type\": \"int\"}]}, \"Parameters\": {\"other_engine_view\": \"true\"}, \"Description\": \"a view of another engine\"}' 2>/dev/null || true;
       aws --endpoint-url http://moto:5000 glue create-table --database-name default --table-input '{\"Name\": \"fixture_view_moved\", \"TableType\": \"VIRTUAL_VIEW\", \"ViewOriginalText\": \"SELECT 1 AS one\", \"ViewExpandedText\": \"SELECT 1 AS one\", \"StorageDescriptor\": {\"Columns\": [{\"Name\": \"one\", \"Type\": \"int\"}]}, \"Parameters\": {\"duckdb_view\": \"true\", \"duckdb_view_version\": \"1\", \"duckdb_view_default_database\": \"elsewhere\"}}' 2>/dev/null || true;
+      aws --endpoint-url http://moto:5000 glue create-table --database-name default --table-input '{\"Name\": \"fixture_view_keep\", \"TableType\": \"VIRTUAL_VIEW\", \"ViewOriginalText\": \"SELECT 1 AS one\", \"ViewExpandedText\": \"SELECT 1 AS one\", \"Description\": \"kept across CREATE OR REPLACE\", \"StorageDescriptor\": {\"Columns\": [{\"Name\": \"one\", \"Type\": \"int\"}]}, \"Parameters\": {\"duckdb_view\": \"true\", \"duckdb_view_version\": \"1\", \"duckdb_view_default_database\": \"default\", \"owner_team\": \"analytics\"}}' 2>/dev/null || true;
       echo 'bucket glue-test, Glue database default, bucketed fixture tables and fixture views ready';
       "

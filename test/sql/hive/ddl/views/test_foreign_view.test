@@ -59,9 +59,22 @@ DESCRIBE my_datalake.default.fixture_view_other;
 can not be queried: it was not written by DuckDB
 
 statement error
+CREATE OR REPLACE VIEW my_datalake.default.fixture_view_plain AS SELECT 1 AS x;
+----
+Glue view "fixture_view_plain" was not written by DuckDB; replace it from the engine that wrote it
+
+statement error
 DROP VIEW my_datalake.default.fixture_view_plain;
 ----
 Glue view "fixture_view_plain" was not written by DuckDB; drop it from the engine that wrote it
+
+statement ok
+CREATE VIEW IF NOT EXISTS my_datalake.default.fixture_view_plain AS SELECT 1 AS x;
+
+statement error
+CREATE VIEW my_datalake.default.fixture_view_plain AS SELECT 1 AS x;
+----
+already exists
 
 query I
 SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'fixture_view_%';
