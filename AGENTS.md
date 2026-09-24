@@ -35,7 +35,7 @@ Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submod
 SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT`,
 `DEFAULT_S3_LOCATION` and creates the S3 secret; without one every test is skipped (`require-env GLUE_CATALOG_ID`).
 
-- `test/configs/local_glue.json`: moto (Glue, port 5555) + MinIO (S3, port 9100) from `scripts/docker-compose.yml`.
+- `test/configs/local_glue.json`: moto (Glue, port 5555) + SeaweedFS (S3, port 9100) from `scripts/docker-compose.yml`.
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything.
 - `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
   (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
@@ -116,7 +116,7 @@ Follow DuckDB's style (`duckdb/AGENTS.md`):
 
 ## Change checklist
 
-- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/MinIO).
+- C++ change: `make format-check`, build `relassert`, run the focused sqllogictests (locally against moto/SeaweedFS).
 - Build change: read both the root `Makefile` and `extension-ci-tools/makefiles/duckdb_extension.Makefile`.
 - Documentation-only change: check commands statically; don't start containers or run tests.
 

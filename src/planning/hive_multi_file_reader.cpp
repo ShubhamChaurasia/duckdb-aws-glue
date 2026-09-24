@@ -4,6 +4,7 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
+#include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -286,6 +287,16 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	// make planning (and EXPLAIN) pay for the listing; answer with what is known and at least one file per partition
 	// still to list.
 	lock_guard<mutex> lck(lock);
+	// An exact count is answered exactly: the progress calculation keeps asking for one more file until everything
+	// is expanded, and never terminates on an estimate. Planning asks with no minimum (see HiveScanCardinality).
+	while (!all_files_expanded && expanded_files.size() < min_exact_count) {
+		if (client_context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		if (!ExpandNextPath()) {
+			all_files_expanded = true;
+		}
+	}
 	if (all_files_expanded) {
 		return MultiFileCount(expanded_files.size(), FileExpansionType::ALL_FILES_EXPANDED);
 	}
@@ -344,6 +355,26 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
 }
 
+//! The file count the base cardinality asks for would list S3 while planning: estimate from the partitions instead
+static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	auto count_info = bind_data.file_list->GetFileCount();
+	auto estimated_file_count = count_info.count;
+	if (count_info.type != FileExpansionType::ALL_FILES_EXPANDED) {
+		estimated_file_count *= 2;
+	}
+	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
+}
+
+static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
+                              const TableFunction &function) {
+	throw NotImplementedException("HiveScan serialization not implemented");
+}
+
+static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+	throw NotImplementedException("HiveScan deserialization not implemented");
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -388,6 +419,11 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
+	// the format reader serializes its file list, which would expand this lazy list (listing S3) while the
+	// common-subplan optimizer computes plan signatures
+	scan_function.SetSerializeCallback(HiveScanSerialize);
+	scan_function.SetDeserializeCallback(HiveScanDeserialize);
+	scan_function.cardinality = HiveScanCardinality;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
