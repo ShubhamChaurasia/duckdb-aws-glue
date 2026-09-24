@@ -23,8 +23,10 @@ BUILD_BENCHMARK=1 ... make relassert                                            
 
 `relassert` is ASAN-instrumented while the vcpkg AWS SDK is not, so always run with
 `ASAN_OPTIONS=detect_container_overflow=0` (otherwise false-positive container-overflow on secret/credential code).
-New `.cpp` files must be added to `EXTENSION_SOURCES` in `CMakeLists.txt`. `extension_config.cmake` also links
-`tpch`, `tpcds` and `avro` (avro is loaded on demand for AvroSerDe tables).
+Each `src/` subdirectory has its own `CMakeLists.txt` (an `add_library_unity` object library appended to
+`GLUE_EXTENSION_FILES`, like DuckDB's own source tree): add new `.cpp` files there, and a new directory with
+`add_subdirectory` in `src/CMakeLists.txt`. `extension_config.cmake` also links `tpch`, `tpcds` and `avro` (avro is
+loaded on demand for AvroSerDe tables).
 
 Run `make format-fix` (clang-format over `src` and `test`, via the duckdb submodule) before committing.
 
@@ -70,30 +72,30 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
 - **Entry point** `src/glue_extension.cpp`: `Aws::InitAPI`, registers the `glue` StorageExtension, the table functions,
   the `glue_hive_ddl` grammar extension, and settings (`glue_network_calls_via_duckdb`, `glue_get_partitions_segments`,
   `hive_partition_listing_threshold`).
-- **Catalog layer** `src/storage/`: the usual DuckDB custom-catalog shape — `GlueCatalog` → `GlueSchemaSet` →
-  `GlueSchemaEntry` (a Glue database) → `GlueTableSet` → `GlueTable`. `GlueAttach` parses ATTACH options.
-  DDL (CREATE/DROP schema/table, ALTER column) is implemented in `GlueSchemaEntry`; Glue types are mapped in
-  `src/glue_types.cpp`. Listing skips tables whose definition can't be converted (logged), direct lookup throws.
-- **All Glue calls** go through static methods on `GlueAPI` (`src/glue_api.cpp`), which convert between SDK objects and
-  plain structs (`GlueTableInfo`, `GluePartitionInfo`, ...). Updates copy the full `Table` into a `TableInput` because
-  Glue's UpdateTable replaces the whole definition.
-- **HTTP transport** `src/glue_http_client.cpp`: a global AWS `HttpClientFactory` sends SDK traffic through DuckDB's
+- **Catalog layer** `src/catalog/`: the usual DuckDB custom-catalog shape — `GlueCatalog` → `GlueSchemaSet` →
+  `GlueSchemaEntry` (a Glue database) → `GlueTableSet` → `GlueTable`. `GlueAttach` parses ATTACH options. DDL
+  (CREATE/DROP schema/table, ALTER column) is implemented in `GlueSchemaEntry`; Glue types are mapped in
+  `src/core/glue_types.cpp`. Listing skips tables whose definition can't be converted (logged), direct lookup throws.
+- **All Glue calls** go through static methods on `GlueAPI` (`src/api/`, one file per resource: databases, tables,
+  partitions), which convert between SDK objects and plain structs (`GlueTableInfo`, `GluePartitionInfo`, ...). Updates
+  copy the full `Table` into a `TableInput` because Glue's UpdateTable replaces the whole definition.
+- **HTTP transport** `src/api/glue_http_client.cpp`: a global AWS `HttpClientFactory` sends SDK traffic through DuckDB's
   `HTTPUtil` (so it's logged and honors DuckDB proxy settings). The calling `ClientContext` reaches it via a
   thread_local scope (`GlueHttpClientContextScope`) set around each `GlueAPI` call.
-- **Reading** `src/storage/hive_multi_file_reader.cpp`: `GlueTable::GetScanFunction` builds a `HiveScanInfo` (Glue schema,
-  partitions from `GetPartitions`, format) and scans with the format's reader (`read_parquet`/`read_csv`/`read_json`/
-  `read_avro`) using `HiveMultiFileReader` + a lazy `HiveMultiFileList`: partition filters are pushed down to Glue's
-  partition values before any S3 listing. The `hive_scan` table function (`src/hive_scan_function.cpp`) reuses the same
-  reader with schema/partitions given as arguments.
-- **Writing** `src/storage/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format with
-  hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. CTAS creates the
-  Glue table at plan time.
-- **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/glue_partition_functions.cpp` provides
-  `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/glue_grammar.cpp` (grammar extension
-  `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition SQL into
-  `CALL glue_alter_table(...)`.
-- `glue_get_table_response` (`src/glue_functions.cpp`) returns the raw Glue `Table` as VARIANT — handy for asserting
-  Glue state in tests.
+- **Reading** `src/planning/hive_multi_file_reader.cpp`: `GlueTable::GetScanFunction` builds a `HiveScanInfo` (Glue
+  schema, partitions from `GetPartitions`, format) and scans with the format's reader
+  (`read_parquet`/`read_csv`/`read_json`/ `read_avro`) using `HiveMultiFileReader` + a lazy `HiveMultiFileList`:
+  partition filters are pushed down to Glue's partition values before any S3 listing. The `hive_scan` table function
+  (`src/functions/hive_scan_function.cpp`) reuses the same reader with schema/partitions given as arguments.
+- **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
+  with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. CTAS creates
+  the Glue table at plan time.
+- **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
+  provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
+  extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition
+  SQL into `CALL glue_alter_table(...)`.
+- `glue_get_table_response` (`src/functions/glue_functions.cpp`) returns the raw Glue `Table` as VARIANT — handy for
+  asserting Glue state in tests.
 
 ## Coding guidelines
 

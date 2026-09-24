@@ -7,15 +7,15 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
-#include "glue_attach.hpp"
-#include "glue_functions.hpp"
-#include "glue_grammar.hpp"
-#include "glue_http_client.hpp"
+#include "catalog/glue_attach.hpp"
+#include "functions/glue_functions.hpp"
+#include "grammar/glue_grammar.hpp"
+#include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
-#include "storage/glue_catalog.hpp"
-#include "storage/glue_transaction_manager.hpp"
+#include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction_manager.hpp"
 
 namespace duckdb {
 
