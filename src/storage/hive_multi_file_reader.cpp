@@ -388,6 +388,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
+	// the format reader serializes its file list, which would expand this lazy list (listing S3) while the
+	// common-subplan optimizer computes plan signatures
+	scan_function.SetSerializeCallback(nullptr);
+	scan_function.SetDeserializeCallback(nullptr);
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
