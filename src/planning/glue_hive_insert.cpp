@@ -7,7 +7,13 @@
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
-#include "duckdb/function/scalar/struct_functions.hpp"
+#include "duckdb/function/scalar/generic_functions.hpp"
+#include "duckdb/function/scalar/string_functions.hpp"
+#include "duckdb/planner/expression/bound_case_expression.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
@@ -40,6 +46,103 @@ static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstanc
 		return nullptr;
 	}
 	return &entry->Cast<CopyFunctionCatalogEntry>();
+}
+
+//! The directory of a partition relative to the table location, empty if the partition is not below it
+static string RelativePartitionPath(const string &table_location, const string &partition_location) {
+	auto prefix = table_location + "/";
+	if (!StringUtil::StartsWith(partition_location, prefix)) {
+		return string();
+	}
+	vector<string> components;
+	for (auto &component : StringUtil::Split(partition_location.substr(prefix.size()), '/')) {
+		if (component.empty() || component == ".") {
+			continue;
+		}
+		if (component == "..") {
+			return string();
+		}
+		components.push_back(component);
+	}
+	return StringUtil::Join(components, "/");
+}
+
+//! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
+//! at other locations, which are written to their own location. 'partition_directories' receives the directories of
+//! those partitions with their Glue values.
+static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTable &table,
+                                                  const GlueTableInfo &table_info, const string &location,
+                                                  const vector<Identifier> &names, const vector<LogicalType> &types,
+                                                  const vector<idx_t> &partition_columns,
+                                                  unordered_map<string, vector<string>> &partition_directories) {
+	FunctionBinder function_binder(context);
+	vector<unique_ptr<Expression>> components;
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		auto column_index = partition_columns[i];
+		vector<unique_ptr<Expression>> children;
+		children.push_back(make_uniq<BoundConstantExpression>(Value(names[column_index].GetIdentifierName())));
+		children.push_back(make_uniq<BoundReferenceExpression>(types[column_index], i));
+		components.push_back(
+		    function_binder.BindScalarFunction(HivePartitionComponentFun::GetFunction(), std::move(children)));
+	}
+	auto hive_path = function_binder.BindScalarFunction(PathJoinFun::GetFunction(), std::move(components));
+
+	auto &glue_catalog = table.catalog.Cast<GlueCatalog>();
+	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.database_name, table_info.name);
+	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	for (auto &partition : partitions) {
+		if (partition.values.size() != partition_columns.size()) {
+			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values, but the table has %d "
+			                            "partition keys",
+			                            StringUtil::Join(partition.values, ", "), table_info.name,
+			                            partition.values.size(), partition_columns.size());
+		}
+		string hive_directory;
+		vector<unique_ptr<Expression>> conditions;
+		for (idx_t i = 0; i < partition_columns.size(); i++) {
+			auto column_index = partition_columns[i];
+			auto value = HivePartitioning::GetValue(context, table_info.partition_keys[i].name, partition.values[i],
+			                                        types[column_index]);
+			hive_directory += i > 0 ? "/" : "";
+			hive_directory += HivePartitioning::Escape(names[column_index].GetIdentifierName()) + "=";
+			hive_directory += value.IsNull() ? HivePartitioning::DEFAULT_PARTITION_NAME
+			                                 : HivePartitioning::EscapeValue(value.ToString());
+			conditions.push_back(BoundComparisonExpression::Create(
+			    ExpressionType::COMPARE_NOT_DISTINCT_FROM, make_uniq<BoundReferenceExpression>(types[column_index], i),
+			    make_uniq<BoundConstantExpression>(std::move(value))));
+		}
+		auto relative_path = RelativePartitionPath(location, partition.location);
+		if (relative_path == hive_directory) {
+			continue;
+		}
+		BoundCaseCheck check;
+		if (conditions.size() == 1) {
+			check.when_expr = std::move(conditions[0]);
+		} else {
+			auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_AND);
+			conjunction->GetChildrenMutable() = std::move(conditions);
+			check.when_expr = std::move(conjunction);
+		}
+		if (relative_path.empty()) {
+			// a copy only writes below its target, so rows of this partition fail the insert
+			vector<unique_ptr<Expression>> children;
+			children.push_back(make_uniq<BoundConstantExpression>(Value(StringUtil::Format(
+			    "Cannot insert into partition [%s] of Hive table '%s': its location '%s' is not below the table "
+			    "location '%s'",
+			    StringUtil::Join(partition.values, ", "), table_info.name, partition.location, location))));
+			auto error = function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(children));
+			check.then_expr = BoundCastExpression::AddCastToType(context, std::move(error), LogicalType::VARCHAR);
+		} else {
+			check.then_expr = make_uniq<BoundConstantExpression>(Value(relative_path));
+			partition_directories.emplace(location + "/" + relative_path, partition.values);
+		}
+		result->CaseChecksMutable().push_back(std::move(check));
+	}
+	if (result->CaseChecks().empty()) {
+		return hive_path;
+	}
+	result->ElseMutable() = std::move(hive_path);
+	return std::move(result);
 }
 
 PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &planner, LogicalOperator &op,
@@ -106,10 +209,15 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 			column_ref->SetAlias(names[i]);
 			struct_children.push_back(std::move(column_ref));
 		}
-		vector<unique_ptr<Expression>> to_json_children;
-		to_json_children.push_back(StructPackFun::GetFunction().Bind(context, std::move(struct_children)));
 		FunctionBinder function_binder(context);
 		ErrorData error;
+		auto struct_pack = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("struct_pack"),
+		                                                      std::move(struct_children), error);
+		if (!struct_pack) {
+			error.Throw();
+		}
+		vector<unique_ptr<Expression>> to_json_children;
+		to_json_children.push_back(std::move(struct_pack));
 		auto to_json = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("to_json"),
 		                                                  std::move(to_json_children), error);
 		if (!to_json) {
@@ -167,12 +275,15 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	auto &copy = physical_copy.Cast<PhysicalCopyToFile>();
 	auto write_id = UUID::ToString(UUID::GenerateRandomUUID());
 	copy.use_tmp_file = false;
+	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
 		copy.file_path = location;
 		copy.partition_output = true;
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
+		copy.partition_path_expression = CreatePartitionPath(context, table, table_info, location, copy_names,
+		                                                     copy_types, partition_columns, partition_directories);
 		copy.filename_pattern.SetFilenamePattern("duckdb_" + write_id + "_{i}");
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
@@ -189,7 +300,8 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	copy.expected_types = copy_types;
 	copy.children.push_back(*source);
 
-	auto &insert = planner.Make<GlueHiveInsert>(op, table, false);
+	auto &insert = planner.Make<GlueHiveInsert>(op, table, false).Cast<GlueHiveInsert>();
+	insert.partition_directories = std::move(partition_directories);
 	insert.children.push_back(physical_copy);
 	return insert;
 }
@@ -283,19 +395,23 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		return SinkFinalizeType::READY;
 	}
 
-	// Register the partition directories the files were written to. The directory names are <key>=<value>, in
-	// partition key order, directly below the table location.
-	auto location = table_info.location;
-	StringUtil::RTrim(location, "/");
+	// Register the partition directories the files were written to: the locations of existing partitions, or
+	// <key>=<value> directories in partition key order below the table location
 	case_insensitive_map_t<GluePartitionInput> partitions;
 	for (auto &file : state.written_files) {
 		auto directory = file.substr(0, file.find_last_of('/'));
 		if (partitions.find(directory) != partitions.end()) {
 			continue;
 		}
-		auto parsed = HivePartitioning::Parse(file);
 		GluePartitionInput partition;
 		partition.location = directory;
+		auto existing = partition_directories.find(directory);
+		if (existing != partition_directories.end()) {
+			partition.values = existing->second;
+			partitions.emplace(directory, std::move(partition));
+			continue;
+		}
+		auto parsed = HivePartitioning::Parse(file);
 		for (auto &key : table_info.partition_keys) {
 			auto value = parsed.find(key.name);
 			if (value == parsed.end()) {

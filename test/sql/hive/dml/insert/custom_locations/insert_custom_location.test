@@ -1,0 +1,144 @@
+# name: test/sql/hive/dml/insert/custom_locations/insert_custom_location.test
+# description: INSERT into existing partitions registered below the table location, but not as <key>=<value>
+# group: [custom_locations]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.custom_loc_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.custom_loc_orders (id INTEGER, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_orders', {dt: '2016-05-16', country: 'IN'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/india_may_16');
+
+# trailing slashes and nested directories in the partition location
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_orders', {dt: '2016-05-16', country: 'US'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/us/2016/05/16/');
+
+# a partition nested inside the directory of another partition
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_orders', {dt: '2016-05-17', country: 'IN'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/india_may_16/next_day');
+
+# a partition at its <key>=<value> location
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_orders', {dt: '2016-05-15', country: 'IN'});
+
+# rows for existing partitions go to their locations, rows for new partitions to <key>=<value> directories
+statement ok
+INSERT INTO my_datalake.default.custom_loc_orders VALUES
+    (1, '2016-05-16', 'IN'),
+    (2, '2016-05-16', 'US'),
+    (3, '2016-05-17', 'IN'),
+    (4, '2016-05-15', 'IN'),
+    (5, '2016-05-18', 'US'),
+    (6, '2016-05-16', 'IN');
+
+query II
+SELECT regexp_extract(file, 'custom_loc_orders/(.*)/[^/]*$', 1) AS dir, count(*)
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/**')
+GROUP BY dir ORDER BY dir;
+----
+dt=2016-05-15/country=IN	1
+dt=2016-05-18/country=US	1
+india_may_16	1
+india_may_16/next_day	1
+us/2016/05/16	1
+
+query III
+SELECT id, dt, country FROM my_datalake.default.custom_loc_orders ORDER BY id;
+----
+1	2016-05-16	IN
+2	2016-05-16	US
+3	2016-05-17	IN
+4	2016-05-15	IN
+5	2016-05-18	US
+6	2016-05-16	IN
+
+# the existing partitions keep their locations, only the new one is registered
+query III
+SELECT dt, country, location FROM glue_partitions('my_datalake.default.custom_loc_orders') ORDER BY dt, country;
+----
+2016-05-15	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/dt=2016-05-15/country=IN
+2016-05-16	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/india_may_16
+2016-05-16	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/us/2016/05/16
+2016-05-17	IN	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/india_may_16/next_day
+2016-05-18	US	{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/dt=2016-05-18/country=US
+
+# a second INSERT appends to the partitions at custom locations
+statement ok
+INSERT INTO my_datalake.default.custom_loc_orders VALUES (7, '2016-05-16', 'US'), (8, '2016-05-17', 'IN');
+
+query II
+SELECT regexp_extract(file, 'custom_loc_orders/(.*)/[^/]*$', 1) AS dir, count(*)
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/**')
+GROUP BY dir ORDER BY dir;
+----
+dt=2016-05-15/country=IN	1
+dt=2016-05-18/country=US	1
+india_may_16	1
+india_may_16/next_day	2
+us/2016/05/16	2
+
+query II
+SELECT dt, list(id ORDER BY id) FROM my_datalake.default.custom_loc_orders WHERE country = 'IN' GROUP BY dt ORDER BY dt;
+----
+2016-05-15	[4]
+2016-05-16	[1, 6]
+2016-05-17	[3, 8]
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.custom_loc_orders');
+----
+5
+
+# a partition moved to a custom location is written there from then on
+statement ok
+CALL glue_set_partition_location('my_datalake.default.custom_loc_orders', {dt: '2016-05-15', country: 'IN'},
+    '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/moved');
+
+statement ok
+INSERT INTO my_datalake.default.custom_loc_orders VALUES (9, '2016-05-15', 'IN');
+
+query I
+SELECT id FROM my_datalake.default.custom_loc_orders WHERE dt = '2016-05-15' ORDER BY id;
+----
+9
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_orders/moved/*');
+----
+1
+
+# INSERT ... SELECT from the table itself
+statement ok
+INSERT INTO my_datalake.default.custom_loc_orders SELECT id + 100, dt, country FROM my_datalake.default.custom_loc_orders WHERE dt = '2016-05-16';
+
+query II
+SELECT country, list(id ORDER BY id) FROM my_datalake.default.custom_loc_orders WHERE dt = '2016-05-16' GROUP BY country ORDER BY country;
+----
+IN	[1, 6, 101, 106]
+US	[2, 7, 102, 107]
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.custom_loc_orders');
+----
+5
+
+statement ok
+DROP TABLE my_datalake.default.custom_loc_orders;

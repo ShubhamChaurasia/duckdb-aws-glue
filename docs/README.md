@@ -63,7 +63,10 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
 - `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
   touched, partition columns are not stored in the files) and register new partition directories in Glue with
-  BatchCreatePartition. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
+  BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
+  its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
+  into a partition whose location is not below the table location fails; the rows of other partitions can still be
+  inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read.
