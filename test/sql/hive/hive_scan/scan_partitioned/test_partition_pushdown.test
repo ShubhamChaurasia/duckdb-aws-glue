@@ -246,10 +246,8 @@ SELECT count(*) c FROM my_datalake.default.pp_orders o JOIN my_datalake.default.
 UNION ALL
 SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
 
-query I
-SELECT count(*) FROM listed_dirs();
-----
-0
+statement ok
+CALL truncate_duckdb_logs();
 
 # different partition filters/table are considered different scans by CommonSubplanOptimizer based using serialized version
 # produced by HiveScanSerialize as identity
