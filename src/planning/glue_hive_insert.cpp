@@ -3,14 +3,11 @@
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
-#include "duckdb/function/scalar/generic_functions.hpp"
 #include "duckdb/function/scalar/string_functions.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
-#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -54,15 +51,12 @@ static string RelativePartitionPath(const string &table_location, const string &
 	if (!StringUtil::StartsWith(partition_location, prefix)) {
 		return string();
 	}
+	// normalized like the copy does, so the directories of the written files match
 	vector<string> components;
 	for (auto &component : StringUtil::Split(partition_location.substr(prefix.size()), '/')) {
-		if (component.empty() || component == ".") {
-			continue;
+		if (!component.empty() && component != ".") {
+			components.push_back(component);
 		}
-		if (component == "..") {
-			return string();
-		}
-		components.push_back(component);
 	}
 	return StringUtil::Join(components, "/");
 }
@@ -124,14 +118,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTa
 			check.when_expr = std::move(conjunction);
 		}
 		if (relative_path.empty()) {
-			// a copy only writes below its target, so rows of this partition fail the insert
-			vector<unique_ptr<Expression>> children;
-			children.push_back(make_uniq<BoundConstantExpression>(Value(StringUtil::Format(
-			    "Cannot insert into partition [%s] of Hive table '%s': its location '%s' is not below the table "
-			    "location '%s'",
-			    StringUtil::Join(partition.values, ", "), table_info.name, partition.location, location))));
-			auto error = function_binder.BindScalarFunction(ErrorFun::GetFunction(), std::move(children));
-			check.then_expr = BoundCastExpression::AddCastToType(context, std::move(error), LogicalType::VARCHAR);
+			// the copy rejects a partition path that is not below its target
+			check.then_expr = make_uniq<BoundConstantExpression>(Value(partition.location));
 		} else {
 			check.then_expr = make_uniq<BoundConstantExpression>(Value(relative_path));
 			partition_directories.emplace(location + "/" + relative_path, partition.values);
@@ -273,8 +261,9 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	    GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST), copy_function->function,
 	    std::move(function_data), op.estimated_cardinality);
 	auto &copy = physical_copy.Cast<PhysicalCopyToFile>();
-	auto write_id = UUID::ToString(UUID::GenerateRandomUUID());
 	copy.use_tmp_file = false;
+	// files of earlier inserts are kept, so every file needs a unique name
+	copy.filename_pattern.SetFilenamePattern("{uuid}");
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
 		copy.file_path = location;
@@ -284,17 +273,17 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		copy.hive_file_pattern = true;
 		copy.partition_path_expression = CreatePartitionPath(context, table, table_info, location, copy_names,
 		                                                     copy_types, partition_columns, partition_directories);
-		copy.filename_pattern.SetFilenamePattern("duckdb_" + write_id + "_{i}");
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
+		copy.per_thread_output = false;
 	} else {
-		copy.file_path = location + "/duckdb_" + write_id + "." + format_name;
+		copy.file_path = location;
 		copy.partition_output = false;
 		copy.write_empty_file = false;
+		copy.per_thread_output = true;
 	}
 	copy.file_extension = format_name;
 	copy.overwrite_mode = CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
-	copy.per_thread_output = false;
 	copy.return_type = CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST;
 	copy.names = copy_names;
 	copy.expected_types = copy_types;

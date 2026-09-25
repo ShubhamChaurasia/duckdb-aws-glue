@@ -39,17 +39,17 @@ CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'root'},
 statement error
 INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'outside');
 ----
-<REGEX>:.*Cannot insert into partition \[outside\] of Hive table 'custom_loc_errors': its location '.*/elsewhere/outside' is not below the table location.*
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/elsewhere/outside".*
 
 statement error
 INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'sibling');
 ----
-Cannot insert into partition [sibling] of Hive table 'custom_loc_errors'
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors_sibling".*
 
 statement error
 INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'root');
 ----
-Cannot insert into partition [root] of Hive table 'custom_loc_errors'
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors".*
 
 # only rows of those partitions fail, the other partitions can be written
 statement ok
