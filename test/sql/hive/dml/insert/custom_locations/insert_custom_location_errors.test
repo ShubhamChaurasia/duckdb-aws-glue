@@ -1,0 +1,75 @@
+# name: test/sql/hive/dml/insert/custom_locations/insert_custom_location_errors.test
+# description: INSERT into partitions whose location cannot be written by a copy into the table location
+# group: [custom_locations]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.custom_loc_errors;
+
+statement ok
+CREATE TABLE my_datalake.default.custom_loc_errors (id INTEGER, part VARCHAR) PARTITIONED BY (part);
+
+# outside the table location
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'outside'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/outside');
+
+# a sibling directory sharing the table location as a name prefix
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'sibling'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors_sibling');
+
+# the table location itself
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'root'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors');
+
+statement error
+INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'outside');
+----
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/elsewhere/outside".*
+
+statement error
+INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'sibling');
+----
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors_sibling".*
+
+statement error
+INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'root');
+----
+<REGEX>:.*PARTITION_PATH must be relative to the COPY target, but got ".*/default/custom_loc_errors".*
+
+# only rows of those partitions fail, the other partitions can be written
+statement ok
+INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'a'), (2, 'b');
+
+query II
+SELECT id, part FROM my_datalake.default.custom_loc_errors WHERE part IN ('a', 'b') ORDER BY id;
+----
+1	a
+2	b
+
+# a partition registered at the <key>=<value> directory of another partition: rows of both cannot share it
+statement ok
+CALL glue_add_partition('my_datalake.default.custom_loc_errors', {part: 'x'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/custom_loc_errors/part=y');
+
+statement error
+INSERT INTO my_datalake.default.custom_loc_errors VALUES (1, 'x'), (2, 'y');
+----
+in the same directory
+
+statement ok
+DROP TABLE my_datalake.default.custom_loc_errors;
