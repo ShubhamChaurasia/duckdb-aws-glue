@@ -41,12 +41,23 @@ string HiveFileFormatToString(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
+//! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
+//! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
+enum class GlueTableType : uint8_t { EXTERNAL_TABLE, VIRTUAL_VIEW, OTHER };
+GlueTableType GlueTableTypeFromString(const string &type);
+
 //! A Glue "Table"
 struct GlueTableInfo {
 	string name;
 	string database_name;
-	//! The Glue TableType (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format
+	//! The Glue TableType as written (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format
 	string glue_table_type;
+	GlueTableType table_type = GlueTableType::OTHER;
+	//! ViewOriginalText / ViewExpandedText of a VIRTUAL_VIEW
+	string view_original_text;
+	string view_expanded_text;
+	//! Table Description
+	string description;
 	//! StorageDescriptor.Location
 	string location;
 	string input_format;
@@ -74,6 +85,9 @@ struct GlueTableInfo {
 	string csv_escape;
 
 public:
+	bool IsView() const {
+		return table_type == GlueTableType::VIRTUAL_VIEW;
+	}
 	//! Derive the open table format from the table parameters
 	GlueTableFormat GetFormat() const;
 	//! Human readable description of the table type, used in error messages
@@ -97,6 +111,17 @@ public:
 	string GetQuoteCharacter() const;
 	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
 	string GetEscapeCharacter() const;
+};
+
+//! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB
+struct GlueViewInfo {
+	string database_name;
+	string name;
+	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	string sql;
+	//! The bound output columns; empty for a view created with DEFER_BINDING
+	vector<GlueColumn> columns;
+	bool secure = false;
 };
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location

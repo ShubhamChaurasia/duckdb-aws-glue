@@ -42,6 +42,16 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	result.name = ToStdString(table.GetName());
 	result.database_name = ToStdString(table.GetDatabaseName());
 	result.glue_table_type = ToStdString(table.GetTableType());
+	result.table_type = GlueTableTypeFromString(result.glue_table_type);
+	if (table.ViewOriginalTextHasBeenSet()) {
+		result.view_original_text = ToStdString(table.GetViewOriginalText());
+	}
+	if (table.ViewExpandedTextHasBeenSet()) {
+		result.view_expanded_text = ToStdString(table.GetViewExpandedText());
+	}
+	if (table.DescriptionHasBeenSet()) {
+		result.description = ToStdString(table.GetDescription());
+	}
 	auto &storage_descriptor = table.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
 	result.input_format = ToStdString(storage_descriptor.GetInputFormat());

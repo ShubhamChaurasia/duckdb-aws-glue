@@ -1,0 +1,85 @@
+# name: test/sql/hive/ddl/views/test_view_guards.test
+# description: statements that do not apply to a Glue view are refused with a clear message
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.vg_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vg_table;
+
+statement ok
+CREATE TABLE my_datalake.default.vg_table (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE VIEW my_datalake.default.vg_view AS SELECT id FROM vg_table;
+
+statement error
+ALTER VIEW my_datalake.default.vg_view RENAME TO vg_renamed;
+----
+Glue cannot rename a view
+
+statement error
+COMMENT ON VIEW my_datalake.default.vg_view IS 'a comment';
+----
+Comments on Glue views are not supported yet
+
+statement error
+ALTER TABLE my_datalake.default.vg_view ADD COLUMN x INTEGER;
+----
+"vg_view" is a view
+
+statement error
+INSERT INTO my_datalake.default.vg_view VALUES (1);
+----
+vg_view is not an table
+
+statement error
+SELECT * FROM glue_partitions('my_datalake.default.vg_view');
+----
+Glue view 'default.vg_view' has no partitions
+
+statement ok
+USE my_datalake.default;
+
+statement error
+SELECT * FROM glue_partitions('vg_view');
+----
+Glue view 'vg_view' has no partitions
+
+statement ok
+USE memory;
+
+statement error
+SELECT * FROM glue_add_partition('my_datalake.default.vg_view', {'dt': '2024-01-01'});
+----
+has no partitions
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement error
+ALTER TABLE my_datalake.default.vg_view ADD PARTITION (dt = '2024-01-01');
+----
+has no partitions
+
+statement ok
+DROP VIEW my_datalake.default.vg_view;
+
+statement ok
+DROP TABLE my_datalake.default.vg_table;

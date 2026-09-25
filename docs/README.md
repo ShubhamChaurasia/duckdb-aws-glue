@@ -80,6 +80,16 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
 
+## Views
+
+- `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...`, `CREATE SECURE VIEW` and
+  `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
+  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database.
+- `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
+  including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
+- `DROP VIEW [IF EXISTS] db.v` deletes the view.
+- `ALTER VIEW ... RENAME` and `COMMENT ON VIEW` are not supported.
+
 ## Reading without a catalog: hive_scan
 
 The same scan is available as a table function, for parquet Hive tables that are not (or not yet) registered in

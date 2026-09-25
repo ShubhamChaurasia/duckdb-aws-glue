@@ -1,0 +1,59 @@
+# name: test/sql/hive/ddl/views/test_view_listing.test
+# description: the catalog functions list every view of a Glue database - usable, of another engine, or moved - without binding them
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.vl_view;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.vl_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.vl_orders (id INTEGER, amount DOUBLE);
+
+statement ok
+CREATE VIEW my_datalake.default.vl_view AS SELECT id FROM vl_orders;
+
+# SHOW ALL TABLES walks every entry of every attached catalog, views included
+query I
+SELECT count(*) >= 6 FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND (name LIKE 'fixture_view_%' OR name = 'vl_view');
+----
+true
+
+# the views of other engines and the moved one are listed, unbound, next to ours (bound by the listing above)
+query II
+SELECT view_name, is_bound FROM duckdb_views() WHERE database_name = 'my_datalake' AND (view_name LIKE 'fixture_view_%' OR view_name = 'vl_view') ORDER BY view_name;
+----
+fixture_view_keep	true
+fixture_view_lateral	false
+fixture_view_moved	false
+fixture_view_other	false
+fixture_view_plain	false
+vl_view	true
+
+# duckdb_columns() binds the usable view and reports the stored columns of the others
+query I
+SELECT count(*) > 0 FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'vl_view';
+----
+true
+
+statement ok
+DROP VIEW my_datalake.default.vl_view;
+
+statement ok
+DROP TABLE my_datalake.default.vl_orders;

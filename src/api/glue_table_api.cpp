@@ -151,6 +151,79 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	}
 }
 
+//! The parameters that mark a view as written by DuckDB
+static void SetViewParameters(Aws::Map<Aws::String, Aws::String> &parameters, const GlueViewInfo &view) {
+	parameters["duckdb_view"] = "true";
+	parameters["duckdb_view_version"] = "1";
+	// the database the unqualified names in the SQL belong to (the one the view is created in)
+	parameters["duckdb_view_default_database"] = view.database_name;
+	if (view.secure) {
+		parameters["duckdb_view_secure"] = "true";
+	} else {
+		parameters.erase("duckdb_view_secure");
+	}
+}
+
+//! Glue's (Hive's) two view fields: the SQL as written and the SQL with names resolved. Both are free text and readers
+//! differ in which one they parse, so both carry the same DuckDB SQL - there is no separate expansion
+static void SetViewDefinition(Aws::Glue::Model::TableInput &table_input, const GlueViewInfo &view) {
+	table_input.SetTableType("VIRTUAL_VIEW");
+	table_input.SetViewOriginalText(view.sql);
+	table_input.SetViewExpandedText(view.sql);
+	Aws::Glue::Model::StorageDescriptor storage_descriptor;
+	if (!view.columns.empty()) {
+		storage_descriptor.SetColumns(ToAwsColumns(view.columns));
+	}
+	table_input.SetStorageDescriptor(storage_descriptor);
+}
+
+static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
+	Aws::Glue::Model::TableInput table_input;
+	table_input.SetName(view.name);
+	SetViewDefinition(table_input, view);
+	Aws::Map<Aws::String, Aws::String> parameters;
+	SetViewParameters(parameters, view);
+	table_input.SetParameters(parameters);
+	return table_input;
+}
+
+static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                            const string &database_name, const string &table_name,
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
+
+void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
+	CheckWritable(catalog, "CreateView");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+
+	Aws::Glue::Model::CreateTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(view.database_name);
+	request.SetTableInput(ToViewTableInput(view));
+	auto outcome = client->CreateTable(request);
+	if (!outcome.IsSuccess()) {
+		if (IsAlreadyExists(outcome)) {
+			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view.name,
+			                       view.database_name);
+		}
+		ThrowGlueError(outcome, StringUtil::Format("CreateView '%s.%s'", view.database_name, view.name));
+	}
+}
+
+void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
+	CheckWritable(catalog, "UpdateView");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	// CREATE OR REPLACE keeps what is not the definition: the description, owner and parameters other engines or
+	// users set stay, the SQL, the columns and our own parameters are replaced
+	UpdateGlueTable(client, catalog, view.database_name, view.name, [&](Aws::Glue::Model::TableInput &table_input) {
+		SetViewDefinition(table_input, view);
+		auto parameters = table_input.GetParameters();
+		SetViewParameters(parameters, view);
+		table_input.SetParameters(parameters);
+	});
+}
+
 //! UpdateTable replaces the whole definition: fetch the current one, let 'modify' change the TableInput built from
 //! it, and send it back
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,

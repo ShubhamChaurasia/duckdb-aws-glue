@@ -1,0 +1,281 @@
+# name: test/sql/hive/ddl/views/test_create_view.test
+# description: CREATE VIEW on a Glue database
+# group: [views]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_simple;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_aliased;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_nested;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_mixed;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_defer;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_secure;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_recursive;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_star;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.cv_union;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.cv_orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.cv_later;
+
+statement ok
+CREATE TABLE my_datalake.default.cv_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.cv_orders VALUES (1, 10.0, '2024-01-01'), (2, 20.0, '2024-01-01'), (3, 30.0, '2024-01-02');
+
+statement ok
+CREATE VIEW my_datalake.default.cv_simple AS SELECT id, amount FROM cv_orders WHERE id > 1;
+
+query II
+SELECT * FROM my_datalake.default.cv_simple ORDER BY id;
+----
+2	20.0
+3	30.0
+
+query IIII
+SELECT view_name, is_bound, column_count, tags['duckdb_view'] FROM duckdb_views()
+WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+----
+cv_simple	true	2	true
+
+# the stored SQL is the query as DuckDB prints it; its unqualified names belong to the view's database
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_simple';
+----
+CREATE VIEW cv_simple AS SELECT id, amount FROM cv_orders WHERE (id > 1);
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_simple);
+----
+id	INTEGER
+amount	DOUBLE
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'cv_simple';
+----
+0
+
+statement error
+CREATE VIEW my_datalake.default.cv_simple AS SELECT 1 AS x;
+----
+View with name "cv_simple" already exists in Glue database "default"
+
+statement ok
+CREATE VIEW IF NOT EXISTS my_datalake.default.cv_simple AS SELECT 1 AS x;
+
+query I
+SELECT count(*) FROM my_datalake.default.cv_simple;
+----
+2
+
+statement ok
+CREATE OR REPLACE VIEW my_datalake.default.cv_simple AS SELECT id FROM cv_orders WHERE id = 3;
+
+query I
+SELECT * FROM my_datalake.default.cv_simple;
+----
+3
+
+statement error
+CREATE VIEW my_datalake.default.cv_orders AS SELECT 1 AS x;
+----
+Existing object cv_orders is of type Table, trying to create type View
+
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.default.cv_simple (x INTEGER);
+----
+Existing object cv_simple is of type View, trying to create type Table
+
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.default.cv_simple AS SELECT 1 AS x;
+----
+Existing object cv_simple is of type View, trying to create type Table
+
+# a column alias list is carried by the stored columns, not by the SQL
+statement ok
+CREATE VIEW my_datalake.default.cv_aliased(k, a) AS SELECT id, amount FROM cv_orders;
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_aliased);
+----
+k	INTEGER
+a	DOUBLE
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_aliased';
+----
+CREATE VIEW cv_aliased AS SELECT id, amount FROM cv_orders;
+
+# an alias list over * or a set operation works the same way
+statement ok
+CREATE VIEW my_datalake.default.cv_star(x, y) AS SELECT * FROM cv_orders;
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_star';
+----
+CREATE VIEW cv_star AS SELECT * FROM cv_orders;
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE my_datalake.default.cv_star);
+----
+x	INTEGER
+y	DOUBLE
+dt	VARCHAR
+
+query III
+SELECT * FROM my_datalake.default.cv_star WHERE x = 3;
+----
+3	30.0	2024-01-02
+
+statement ok
+CREATE VIEW my_datalake.default.cv_union(n) AS SELECT id FROM cv_orders UNION ALL SELECT id + 10 FROM cv_orders;
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_union';
+----
+CREATE VIEW cv_union AS (SELECT id FROM cv_orders) UNION ALL (SELECT (id + 10) FROM cv_orders);
+
+query I
+SELECT count(*) FROM my_datalake.default.cv_union WHERE n > 5;
+----
+3
+
+# view over view, joined with a table of another catalog
+statement ok
+CREATE TABLE names (k INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO names VALUES (1, 'one'), (2, 'two');
+
+statement ok
+CREATE VIEW my_datalake.default.cv_nested AS SELECT k, a FROM cv_aliased WHERE k < 3;
+
+query III
+SELECT n.name, v.k, v.a FROM my_datalake.default.cv_nested v JOIN names n USING (k) ORDER BY k;
+----
+one	1	10.0
+two	2	20.0
+
+# names are stored as written (a table written with the catalog keeps its database, not the catalog name)
+statement ok
+CREATE VIEW my_datalake.default.cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM t JOIN my_datalake.default.cv_orders o ON t.id = o.id WHERE o.dt = '2024-01-02';
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_mixed';
+----
+CREATE VIEW cv_mixed AS WITH t AS (SELECT id FROM cv_orders) SELECT t.id FROM (t INNER JOIN "default".cv_orders AS o ON ((t.id = o.id))) WHERE (o.dt = '2024-01-02');
+
+query I
+SELECT * FROM my_datalake.default.cv_mixed;
+----
+3
+
+# DEFER_BINDING: created unbound, bound on first use
+statement ok
+CREATE VIEW my_datalake.default.cv_defer WITH (DEFER_BINDING) AS SELECT id FROM cv_later;
+
+query II
+SELECT view_name, is_bound FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_defer';
+----
+cv_defer	false
+
+statement ok
+CREATE TABLE my_datalake.default.cv_later (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.default.cv_later VALUES (7);
+
+query I
+SELECT * FROM my_datalake.default.cv_defer;
+----
+7
+
+statement ok
+CREATE SECURE VIEW my_datalake.default.cv_secure AS SELECT id FROM cv_orders;
+
+query I
+SELECT sql FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'cv_secure';
+----
+CREATE SECURE VIEW cv_secure AS SELECT id FROM cv_orders;
+
+statement ok
+CREATE VIEW my_datalake.default.cv_recursive AS SELECT 1 AS x;
+
+statement ok
+CREATE OR REPLACE VIEW my_datalake.default.cv_recursive WITH (DEFER_BINDING) AS SELECT x FROM cv_recursive;
+
+statement error
+SELECT * FROM my_datalake.default.cv_recursive;
+----
+recursive
+
+query I
+SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'cv_%';
+----
+9
+
+statement ok
+DROP VIEW my_datalake.default.cv_union;
+
+statement ok
+DROP VIEW my_datalake.default.cv_star;
+
+statement ok
+DROP VIEW my_datalake.default.cv_recursive;
+
+statement ok
+DROP VIEW my_datalake.default.cv_secure;
+
+statement ok
+DROP VIEW my_datalake.default.cv_defer;
+
+statement ok
+DROP VIEW my_datalake.default.cv_mixed;
+
+statement ok
+DROP VIEW my_datalake.default.cv_nested;
+
+statement ok
+DROP VIEW my_datalake.default.cv_aliased;
+
+statement ok
+DROP VIEW my_datalake.default.cv_simple;
+
+statement ok
+DROP TABLE my_datalake.default.cv_later;
+
+statement ok
+DROP TABLE my_datalake.default.cv_orders;
